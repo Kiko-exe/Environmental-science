@@ -1,0 +1,756 @@
+---
+title: "Tracking Rainfall Trends in Aotearoa: Climate Signals from Auckland and Queenstown"
+author: "Yuehan Luo (169890290)"
+date: "2025-05-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## As climate change intensifies, one question keeps coming up: how does rising temperature affect rainfall in New Zealand?
+To explore this, I examined historical climate data from NIWA. The analysis draws on annual and monthly temperature records from seven stations and rainfall data from five locations, capturing a broad range of regional climates — from subtropical Auckland in the north to alpine Queenstown in the south. Together, these sites reveal how different parts of Aotearoa respond to long-term environmental shifts.
+
+The workflow, built entirely in R, follows a reproducible process: data cleaning, trend visualization, city-level climate comparison, and exploratory modelling. I also dig deeper into two key modifiers: terrain and ENSO patterns. These factors help explain why rainfall–temperature relationships differ so markedly between Auckland and Queenstown. To better understand interannual variability, I examined rainfall anomalies, and tested whether historical relationships could predict rainfall in 2024 and beyond.
+
+Rather than presenting this as a formal scientific report, the aim is to share the process and findings in an accessible, reflective format. Along the way, I highlight key decisions, challenges, and learning points — showing how open-source tools like R can be used to explore pressing climate questions in a transparent and engaging way.
+
+## Libraries
+Below are the R packages used in this workflow, each supporting specific aspects of data handling, spatial processing, or visualisation. Inline comments describe their roles.
+
+```{r}
+# Data import and wrangling
+library(readxl)        # Read Excel files
+library(tidyverse)     # Core packages for data manipulation and plotting
+library(janitor)       # Data cleaning utilities
+library(lubridate)     # Date parsing and manipulation
+
+# Spatial data handling
+library(sf)            # Simple features for spatial data
+library(terra)         # Raster and spatial data processing
+
+# Plotting and layout
+library(ggplot2)       # Grammar of graphics
+library(patchwork)     # Combine multiple ggplots
+library(tmap)          # Thematic maps
+library(gridExtra)     # Arrange multiple plots
+library(plotly)        # Interactive plots
+
+# Spatial base maps
+library(rnaturalearth)     # Country and coastline data
+library(rnaturalearthdata) # Supporting map datasets
+
+# Used internally by tidyverse but loaded explicitly for clarity
+library(tidyr)         # Data reshaping
+library(dplyr)         # Data filtering and summarising
+
+library(elevatr)       # Download elevation data (useful for topographic analysis)
+library(rsoi)          # Tools for climate oscillation indices (e.g., SOI, ENSO)
+library(readr)         # Fast CSV reading functions from tidyverse
+library(geodata)       # Access WorldClim and CMIP6 data for historical/future projections
+library(viridis)       # Colorblind-friendly color scales for visualisations
+```
+
+## Site-Level Temperature Trends Across New Zealand
+The plot below visualises annual mean temperatures from seven stations across New Zealand (1980–2018). Auckland records the highest average temperatures, while Dunedin is consistently the coldest. Despite fluctuations, most stations show a mild upward trend over time, suggesting gradual regional warming. This forms the basis for exploring whether rising temperatures are linked to changes in rainfall, which is addressed in later sections.
+
+```{r}
+# Step 1: read the file
+df <- read_excel("NZT7_Adjusted_Annual_TMean2018_Web-updated-jan-2019.xlsx", skip = 1)
+                  
+# Step 2: Select all temperature columns, easy to rename
+temp_cols <- c("Auckland_Temp", "Masterton_Temp", "Wellington_Temp", "Hokitika_Temp", "Nelson_Temp", "Lincoln_Temp", "Dunedin_Temp")
+
+# Step 3: Take only Year and these temperature columns
+df_temp <- df %>%
+  select(Year, all_of(temp_cols))
+
+# Step 4: To convert to a long format, key is the site, value is the temperature
+df_long <- df_temp %>%
+  pivot_longer(cols = -Year, 
+               names_to = "Station", 
+               values_to = "Temp")
+
+# Step 5: Change the site name to a simpler one, such as removing the suffix "_Temp"
+df_long <- df_long %>%
+  mutate(Station = gsub("_Temp", "", Station))
+
+# Step 6: Plot
+ggplot(df_long, aes(x = Year, y = Temp, color = Station)) +
+  geom_line() +
+  labs(title = "Temperature at each Sitation over Year (1980 to 2018)", y = "Temperature (°C)", x = "Year") +
+  theme_minimal()
+```
+
+## Regional Warming: North vs South Island Trends
+This plot compares the annual average temperatures of the North and South Islands from 1980 to 2018. The North Island remains consistently warmer, averaging over 13°C, while the South stays below 12.5°C. Despite year-to-year fluctuations, both regions show a clear warming trend over time, providing a broader climate context for the rainfall analysis that follows.
+
+```{r}
+# Step 1: Create a lookup table for the island to which the site belongs
+station_island <- data.frame(
+  Station = c("Auckland", "Masterton", "Wellington", "Hokitika", "Nelson", "Lincoln", "Dunedin"),
+  Island = c("North", "North", "North", "South", "South", "South", "South"))
+
+#Step 2: Combine island information and calculate the average temperature of each island in each year
+df_long <- df_long %>%
+  left_join(station_island, by = "Station")
+
+df_island_avg <- df_long %>%
+  group_by(Year, Island) %>%
+  summarise(Avg_Temp = mean(Temp, na.rm = TRUE)) %>%
+  ungroup()
+
+# Step 3: Plot
+ggplot(df_island_avg, aes(x = Year, y = Avg_Temp, color = Island)) +
+  geom_line(size = 1) +
+  geom_point() +
+  labs(title = "Annual average temperature change between North and South Islands(1980 to 2018)",
+       x = "Year",
+       y = "Average Temperature(°C)",
+       color = "Island") +
+  theme_minimal()
+
+```
+
+## Rainfall Observation Sites Across New Zealand
+This map shows the locations of five rainfall monitoring stations used in this analysis, distributed across both the North and South Islands. These sites provide long-term precipitation records that help us explore spatial patterns in rainfall and how they may relate to regional temperature trends over time.
+
+```{r}
+stations <- data.frame(
+  Station = c("LOWER WHATAROA", "QUEENSTOWN AERO", "AUCKLAND AERO", "NGAKURU", "PUKEITI"),
+  Latitude = c(-43.240, -45.021, -37.008, -38.383, -39.268),
+  Longitude = c(170.383, 168.740, 174.791, 176.133, 174.046),
+  Island = c("South", "South", "North", "North", "North"))
+
+stations_sf <- st_as_sf(stations, coords = c("Longitude", "Latitude"), crs = 4326)
+
+nz <- ne_countries(scale = "medium", country = "New Zealand", returnclass = "sf")
+
+ggplot() +
+  geom_sf(data = nz, fill = "lightgray", color = "black") +  # Draw New Zealand borders
+  geom_sf(data = stations_sf, color = "blue", size = 2) +     # Add precipitation site
+  geom_sf_text(data = stations_sf, aes(label = Station),          
+               size = 2, nudge_y = 0.3, check_overlap = TRUE) + 
+  coord_sf(xlim = c(165, 180), ylim = c(-48, -33)) +          # Limited map range
+  labs(title = "Rainfall Stations in New Zealand",
+       subtitle = "Study area with selected stations",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal()
+```
+
+## Island-Level Rainfall Patterns in New Zealand 
+This plot shows the annual average rainfall across selected stations in New Zealand’s North and South Islands between 1993 and 2012. Throughout the period, the South Island consistently receives more rainfall than the North, often exceeding 2500 mm per year. While both regions show interannual variability, no clear upward or downward trend is immediately evident, raising questions about how rainfall relates to the warming patterns observed earlier.
+
+```{r}
+# Load rainfall data and plot annual average rainfall by island
+# Step 1: Read in rainfall data from Excel (wide format)
+rain_wide <- read_excel("ranfall_year.xlsx")
+
+# Step 2: Reshape from wide to long format for analysis
+rain_long <- rain_wide %>%
+  pivot_longer(-Year, names_to = "Station", values_to = "Rainfall")
+
+# Step 3: Assign each station to its island (North or South)
+rain_long <- rain_long %>%
+  mutate(Island = case_when(
+    Station %in% c("AUCKLAND", "NGAKURU", "PUKETI") ~ "North",
+    Station %in% c("LOWER WHATAROA", "QUEENSTWON AERO") ~ "South",
+    TRUE ~ NA_character_
+  ))
+
+# Step 4: Calculate annual average rainfall by island
+island_avg <- rain_long %>%
+  group_by(Year, Island) %>%
+  summarise(Avg_Rainfall = mean(Rainfall, na.rm = TRUE), .groups = "drop")
+
+# Step 5: Visualise trends using line plot
+ggplot(island_avg, aes(x = Year, y = Avg_Rainfall, color = Island)) +
+  geom_line(size = 1) +
+  geom_point() +
+  labs(
+    title = "Annual Average Rainfall by Island",
+    subtitle = "New Zealand: North Island vs South Island",
+    x = "Year",
+    y = "Average Rainfall (mm)",
+    color = "Island"
+  ) +
+  theme_minimal()
+```
+
+## Auckland vs Queenstown: Exploring Local Climate Relationships
+To explore temperature–rainfall dynamics at the local level, we examine monthly data from two contrasting cities: Auckland (warm and humid) and Queenstown (cooler and drier). The time-series plots below show fluctuations in both temperature and rainfall over time.
+
+### Auckland: Warming Up, But What About the Rain?
+I started the project in Auckland — a city known for its humid subtropical vibe and unpredictable weather. The goal was simple: see if rising temperatures are driving changes in rainfall at the monthly scale. The data I used stretched from the 1960s to the 2020s, which felt like plenty to work with (until I realized how messy it was).
+
+```{r}
+temp_all_akl <- read_csv("Auckland_monthly_temp.csv", show_col_types = FALSE)
+rain_all_akl <- read_csv("rainfall_data/AUCKLAND_AERO/Auckland_monthly_rain.csv", show_col_types = FALSE)
+
+# Step 2: Rename columns for clarity
+temp <- temp_all_akl %>%
+  rename(Year = YEAR, Month = PERIOD, mean_temp = STATS_VALUE)
+
+rain <- rain_all_akl %>%
+  rename(Year = YEAR, Month = PERIOD, rain = STATS_VALUE)
+
+# Step 3: Join temperature and rainfall data by year and month
+akl_clean <- inner_join(temp, rain, by = c("Year", "Month"))
+
+# Step 4: Remove rows with missing values
+akl_clean <- na.omit(akl_clean)
+
+# Step 5: Optional - order by date
+akl_clean <- akl_clean %>%
+  mutate(Month = factor(Month, levels = month.name)) %>%
+  arrange(Year, Month)
+
+```
+
+#### Getting the Temperature and Rain to Agree
+Temperature and rainfall came from different CSVs, and of course, they didn’t use the normal languages. Months were labeled differently, some values were missing, and a few rows had strange duplicates. After some cleaning, I merged the two datasets and started plotting.
+
+The seasonal cycle jumped out instantly — hotter summers, cooler winters — but rainfall was less tidy. Some months poured, others didn’t, even when temperatures were similar. Still, I pressed on with a linear regression, curious to see how well temperature alone could predict rain.
+
+```{r}
+akl_clean <- akl_clean %>%
+  mutate(Month_num = match(Month, month.name),
+         Date = as.Date(paste(Year, Month_num, "01", sep = "-")))
+
+gg_temp <- ggplot(akl_clean, aes(x = Date, y = mean_temp)) +
+  geom_line(color = "tomato") +
+  labs(title = "Monthly Mean Temperature in Auckland (1960s–2020s)",
+       x = "Date", y = "Temperature (°C)") +
+  theme_minimal()
+
+gg_rain <- ggplot(akl_clean, aes(x = Date, y = rain)) +
+  geom_line(color = "steelblue") +
+  labs(title = "Monthly Rainfall in Auckland (1960s–2020s)",
+       x = "Date", y = "Rainfall (mm)") +
+  theme_minimal()
+
+grid.arrange(gg_temp, gg_rain, ncol = 1)
+
+```
+
+#### Can Temperature Predict Rainfall in Auckland? Sort of.
+The 2024 model results were mixed. The predicted rainfall followed the seasonal rhythm well enough, with higher values in Autum and winter, but it completely missed the spikes in May and October. This mismatch suggests temperature isn’t the only driver of rainfall, especially in a coastal, wind-influenced city like Auckland. It was a useful first attempt, but clearly not the full picture.
+
+```{r}
+# Step 1: Read file
+akl_2024 <- read_excel("Auckland_2024.xlsx")
+
+# Step 2: Standardized column names
+akl_2024 <- akl_2024 %>%
+  rename(mean_temp = Mean_temp, rain = Total_rainfall)
+
+# Step 3: Make sure the month order is correct + Create Date columns (for horizontal axis)
+akl_2024 <- akl_2024 %>%
+  mutate(Month = factor(Month, levels = month.name, ordered = TRUE),
+         Month_num = match(Month, month.name),
+         Date = as.Date(paste(Year, Month_num, "01", sep = "-")))
+
+# Step 4: Establish a linear model based on long-term data
+model_akl <- lm(rain ~ mean_temp, data = akl_clean)
+summary(model_akl) 
+
+# Step 5: Generate prediction value + error column
+akl_2024$predicted_rain <- predict(model_akl, newdata = akl_2024)
+akl_2024$error <- akl_2024$rain - akl_2024$predicted_rain
+
+# Step 6: Visualization (using Date as the x-axis, automatically wired)
+ggplot(akl_2024, aes(x = Date)) +
+  geom_line(aes(y = rain), color = "steelblue", size = 1.2) +
+  geom_line(aes(y = predicted_rain), color = "tomato", size = 1.2, linetype = "dashed") +
+  geom_point(aes(y = rain), color = "steelblue", size = 2) +
+  geom_point(aes(y = predicted_rain), color = "tomato", size = 2, shape = 1) +
+  labs(title = "Predicted vs Actual Rainfall in Auckland (2024)",
+       subtitle = "Solid = Actual, Dashed = Predicted",
+       x = "Month", y = "Rainfall (mm)") +
+  scale_x_date(date_labels = "%b", date_breaks = "1 month") +
+  theme_minimal()
+```
+
+#### Fast-Forward to 2050: What Happens If Auckland Warms by 1.5°C?
+To test how future warming might change things, I took the historical average temperatures and added 1.5°C (a common IPCC scenario). Feeding this into the same regression model gave me predicted rainfall for each month in 2050.
+
+The results were subtle but interesting: Auckland might see drier winters and slightly wetter springs. Again, this is just a rough sketch, I’m only using temperature as a predictor, but it highlights how small shifts in average conditions could change seasonal rain distribution.
+
+```{r}
+# Step 1: Calculate the average temperature per month (historical)
+avg_temp_by_month <- akl_clean %>%
+  group_by(Month) %>%
+  summarise(mean_temp = mean(mean_temp, na.rm = TRUE)) %>%
+  mutate(mean_temp = mean_temp + 1.5)  # Assume that the temperature rises by 1.5°C
+
+# Step 2: Add year and construct Date columns
+akl_2050 <- avg_temp_by_month %>%
+  mutate(Year = 2050,
+         Month = factor(Month, levels = month.name, ordered = TRUE),
+         Month_num = match(Month, month.name),
+         Date = as.Date(paste(Year, Month_num, "01", sep = "-")))
+
+# Step 3: Predict using the model trained before
+akl_2050$predicted_rain <- predict(model_akl, newdata = akl_2050)
+
+# Step 4: Extract historical monthly average rainfall (comparatively used)
+rain_hist_avg <- akl_clean %>%
+  group_by(Month) %>%
+  summarise(rain = mean(rain, na.rm = TRUE)) %>%
+  mutate(Year = "Historical",
+         Month = factor(Month, levels = month.name, ordered = TRUE),
+         Month_num = match(Month, month.name),
+         Date = as.Date(paste("2050", Month_num, "01", sep = "-")))  # Use 2050 as a horizontal axis
+
+# Step 5: Merge both
+rain_compare <- bind_rows(
+  akl_2050 %>% select(Date, Month, predicted_rain) %>% rename(rain = predicted_rain) %>% mutate(Source = "Predicted 2050"),
+  rain_hist_avg %>% select(Date, Month, rain) %>% mutate(Source = "Historical Avg")
+)
+
+# Step 6: Plot
+ggplot(rain_compare, aes(x = Date, y = rain, color = Source, group = Source)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  scale_x_date(date_labels = "%b", date_breaks = "1 month") +
+  labs(title = "Predicted Rainfall in Auckland (2050)",
+       subtitle = "Compared with Historical Monthly Averages",
+       x = "Month", y = "Rainfall (mm)") +
+  theme_minimal()
+```
+
+Auckland was a great place to start because its patterns are fairly regular. But even here, rainfall is shaped by way more than just heat — wind systems, sea surface temperatures, even urban effects all play a role. The real takeaway for me? Don’t trust a single variable.
+
+### Queenstown: Chasing Rain in the Mountains
+After finishing up with Auckland, I turned to Queenstown — the alpine darling of the South Island. Compared to Auckland’s warm humidity, Queenstown promised crisp winters, cool summers, and a chance to see how mountain terrain affects the climate–rainfall relationship.
+
+#### First Impressions: Wild and Jagged
+The temperature data looked clean with sharp seasonal peaks and dips, just what you’d expect from a mountain town. Rainfall, on the other hand, was a mess. Unlike Auckland’s gentle rhythm, Queenstown’s rainfall swung unpredictably, with some months showing massive spikes that didn’t correspond neatly to temperature changes.
+
+Still, I merged the datasets, lined up the dates, and ran a model. But this time, instead of just using temperature to predict rainfall, I added seasonality (month) into the mix.
+
+```{r}
+# Step 1: Read Queenstown temperature and rainfall
+temp_all_qtn <- read_csv("Queenstown_monthly_temp.csv", show_col_types = FALSE) %>%
+  rename(Year = YEAR, Month = PERIOD, mean_temp = STATS_VALUE)
+
+rain_all_qtn <- read_csv("rainfall_data/QUEENSTOWN_AERO/Queenstown_monthly_rain.csv", show_col_types = FALSE) %>%
+  rename(Year = YEAR, Month = PERIOD, rain = STATS_VALUE)
+
+# Step 2: Merge, clean
+qtn_clean <- inner_join(temp_all_qtn, rain_all_qtn, by = c("Year", "Month")) %>%
+  na.omit() %>%
+  mutate(Month = factor(Month, levels = month.name, ordered = TRUE)) %>%
+  arrange(Year, Month) %>%
+  mutate(Month_num = match(Month, month.name),
+         Date = as.Date(paste(Year, Month_num, "01", sep = "-")))
+
+# Step 3: Temperature
+gg_qtn_temp <- ggplot(qtn_clean, aes(x = Date, y = mean_temp)) +
+  geom_line(color = "tomato") +
+  labs(title = "Monthly Mean Temperature in Queenstown (1990s–2020s)",
+       x = "Date", y = "Temperature (°C)") +
+  theme_minimal()
+
+# Step 4: Rainfall
+gg_qtn_rain <- ggplot(qtn_clean, aes(x = Date, y = rain)) +
+  geom_line(color = "steelblue") +
+  labs(title = "Monthly Rainfall in Queenstown (1990s–2020s)",
+       x = "Date", y = "Rainfall (mm)") +
+  theme_minimal()
+
+# Step 5: Stitching images
+gridExtra::grid.arrange(gg_qtn_temp, gg_qtn_rain, ncol = 1)
+```
+
+#### A Better Model — But Still Not Great
+The updated model using temperature + month to fit much better than Auckland’s version. It got the overall shape right and tracked monthly ups and downs more closely. But big surprises (like a rain spike in September 2024) threw it off completely. This made me wonder: was there something more physical, more geographical at play?
+
+```{r}
+# Step 1: Read Queenstown 2024 data
+qtn_2024 <- read_excel("Queenstown_2024.xlsx")
+
+# Step 2: Standardized column names
+qtn_2024 <- qtn_2024 %>%
+  rename(mean_temp = Mean_temp, rain = Total_rainfall)
+
+# Step 3: Set the order of months + create Date columns
+qtn_2024 <- qtn_2024 %>%
+  mutate(Month = factor(Month, levels = month.name, ordered = TRUE),
+         Month_num = match(Month, month.name),
+         Date = as.Date(paste(Year, Month_num, "01", sep = "-")))
+
+# Step 4: Establish an improved predictive model (taking month as a factor)
+model_qtn_improved <- lm(rain ~ mean_temp + factor(Month), data = qtn_clean)
+summary(model_qtn_improved)  
+
+# Step 5: Loading 2024 observation data
+qtn_2024 <- read_excel("Queenstown_2024.xlsx") %>%
+  rename(mean_temp = Mean_temp, rain = Total_rainfall) %>%
+  mutate(
+    Month = factor(Month, levels = month.name, ordered = TRUE),
+    Month_num = match(Month, month.name),
+    Date = as.Date(paste(Year, Month_num, "01", sep = "-"))
+  )
+
+# Step 6: Generate prediction values and errors
+qtn_2024$predicted_rain <- predict(model_qtn_improved, newdata = qtn_2024)
+qtn_2024$error <- qtn_2024$rain - qtn_2024$predicted_rain
+
+# Step 7: Visual predictions and real values
+ggplot(qtn_2024, aes(x = Date)) +
+  geom_line(aes(y = rain), color = "steelblue", size = 1.2) +
+  geom_line(aes(y = predicted_rain), color = "tomato", size = 1.2, linetype = "dashed") +
+  geom_point(aes(y = rain), color = "steelblue", size = 2) +
+  geom_point(aes(y = predicted_rain), color = "tomato", size = 2, shape = 1) +
+  labs(
+    title = "Improved Prediction vs Actual Rainfall in Queenstown (2024)",
+    subtitle = "Solid = Actual, Dashed = Predicted (with seasonal adjustment)",
+    x = "Month", y = "Rainfall (mm)"
+  ) +
+  scale_x_date(date_labels = "%b", date_breaks = "1 month") +
+  theme_minimal()
+```
+
+#### 2050 Forecast: Even Drier?
+When I applied the same +1.5°C warming scenario to Queenstown, the model projected lower rainfall across most of the year, especially in winter and spring. While this is only a rough estimate, it raises red flags for water supply, agriculture, and even tourism, sectors that depend heavily on seasonal predictability.
+
+```{r}
+# Step 1: Calculate the historical average temperature for Queenstown each month and assume a temperature rise of 1.5°C
+avg_temp_by_month_qtn <- qtn_clean %>%
+  group_by(Month) %>%
+  summarise(mean_temp = mean(mean_temp, na.rm = TRUE)) %>%
+  mutate(mean_temp = mean_temp + 1.5)
+
+# Step 2: Create a data frame for forecasting in 2050
+qtn_2050 <- avg_temp_by_month_qtn %>%
+  mutate(
+    Year = 2050,
+    Month = factor(Month, levels = month.name, ordered = TRUE),
+    Month_num = match(Month, month.name),
+    Date = as.Date(paste(Year, Month_num, "01", sep = "-"))
+  )
+
+# Step 3: Prediction using improved models
+qtn_2050$predicted_rain <- predict(model_qtn_improved, newdata = qtn_2050)
+
+# Step 4: Get historical monthly average rainfall
+rain_hist_avg_qtn <- qtn_clean %>%
+  group_by(Month) %>%
+  summarise(rain = mean(rain, na.rm = TRUE)) %>%
+  mutate(
+    Year = "Historical",
+    Month = factor(Month, levels = month.name, ordered = TRUE),
+    Month_num = match(Month, month.name),
+    Date = as.Date(paste("2050", Month_num, "01", sep = "-"))
+  )
+
+# Step 5: Merge historical and predicted data for comparison
+rain_compare_qtn <- bind_rows(
+  qtn_2050 %>%
+    select(Date, Month, predicted_rain) %>%
+    rename(rain = predicted_rain) %>%
+    mutate(Source = "Predicted 2050"),
+  rain_hist_avg_qtn %>%
+    select(Date, Month, rain) %>%
+    mutate(Source = "Historical Avg")
+)
+
+# Step 6: Visualization
+ggplot(rain_compare_qtn, aes(x = Date, y = rain, color = Source, group = Source)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  scale_x_date(date_labels = "%b", date_breaks = "1 month") +
+  labs(
+    title = "Predicted Rainfall in Queenstown (2050)",
+    subtitle = "Compared with Historical Monthly Averages",
+    x = "Month", y = "Rainfall (mm)"
+  ) +
+  theme_minimal()
+```
+
+## City-Level Climate Relationships: Auckland vs Queenstown
+This interactive scatterplot maps out how temperature and rainfall interact — or don’t — in Auckland and Queenstown. Each dot represents a single month. While Auckland shows a slight negative trend (warmer months being a bit drier), the relationship is weak at best. For Queenstown, there’s virtually no pattern at all.
+
+That surprised me at first. But then I remembered: Queenstown sits deep in a mountain basin, surrounded by peaks that scramble the usual climate rules. It’s a place where local geography trumps simple logic. So while Auckland’s climate still plays by the seasonal script, Queenstown’s rainfall is likely shaped by shifting airflows, orographic effects, and maybe even a bit of chaos.
+
+Try hovering over the points to explore monthly patterns for each city — you might spot a few oddball months yourself.
+```{r}
+akl_clean <- akl_clean %>% mutate(Month = as.character(Month), City = "Auckland")
+qtn_clean <- qtn_clean %>% mutate(Month = as.character(Month), City = "Queenstown")
+climate_monthly <- bind_rows(akl_clean, qtn_clean)
+
+p <- ggplot(climate_monthly, aes(x = mean_temp, y = rain, color = City,
+                                 text = paste0("City: ", City,
+                                               "<br>Date: ", format(Date, "%Y-%b"),
+                                               "<br>Temp: ", round(mean_temp, 1), "°C",
+                                               "<br>Rain: ", round(rain, 1), " mm"))) +
+  geom_point(alpha = 0.5, size = 2) +
+  geom_smooth(method = "lm", se = FALSE, aes(group = City, color = City)) +
+  labs(title = "Monthly Temperature vs Rainfall: Auckland vs Queenstown",
+       subtitle = "Two separate trendlines by city (dashed)",
+       x = "Mean Temperature (°C)", y = "Rainfall (mm)", color = "City") +
+  theme_minimal()
+
+ggplotly(p, tooltip = "text")
+
+```
+
+## Why?
+#### The Terrain Tells a Story
+To dig deeper, I loaded up a digital elevation model (DEM) and took a closer look at the terrain around both cities. The contrast is striking.
+
+Queenstown sits nestled in a deep inland basin, surrounded by steep mountain ranges on nearly every side. These mountains likely block moist westerly winds, creating localised rain shadows and making rainfall highly unpredictable. It’s a textbook case of orographic effects — and it helps explain why there's almost no consistent relationship between temperature and rainfall in the region.
+
+In contrast, Auckland lies on a narrow isthmus between the Tasman Sea and the Pacific Ocean. With sea breezes on both sides and relatively low elevation, its climate is more marine and moderated. This geography allows more consistent atmospheric circulation, which might explain why Auckland shows at least some seasonal structure in rainfall, even if the temperature–rainfall relationship remains weak.
+
+```{r}
+# Step 1: Create Auckland Point
+auckland <- st_as_sf(
+  data.frame(name = "Auckland", lon = 174.76, lat = -36.85),
+  coords = c("lon", "lat"), crs = 4326
+)
+
+# Step 2: Create a 30 km buffer around Auckland
+auckland_buffer <- st_transform(auckland, crs = 3857) %>%
+  st_buffer(dist = 30000) %>%
+  st_transform(crs = 4326)
+
+# Step 3: Download DEM
+dem_akl <- get_elev_raster(locations = auckland_buffer, z = 10, clip = "locations")
+
+# Step 4: Plot DEM with color + label
+plot(dem_akl,
+     col = terrain.colors(100),
+     main = "DEM around Auckland",
+     legend = TRUE)
+
+points(st_coordinates(auckland)[1], st_coordinates(auckland)[2],
+       pch = 19, col = "blue", cex = 1.2)
+
+text(st_coordinates(auckland)[1], st_coordinates(auckland)[2] + 0.03,
+     "Auckland", col = "blue", cex = 1.1)
+```
+
+
+```{r}
+# Step 1: Create Queenstown Point
+queenstown <- st_as_sf(
+  data.frame(name = "Queenstown", lon = 168.66, lat = -45.03),
+  coords = c("lon", "lat"), crs = 4326
+)
+
+# Step 2: Create a 30 km buffer around Queenstown
+queenstown_buffer <- st_transform(queenstown, crs = 3857) %>%
+  st_buffer(dist = 30000) %>%
+  st_transform(crs = 4326)
+
+# Step 3: Download DEM
+dem_qtn <- get_elev_raster(locations = queenstown_buffer, z = 10, clip = "locations")
+dem_qtn <- rast(dem_qtn)  # Convert to terra format
+
+# Step 4: Plot DEM with color + label
+plot(dem_qtn,
+     col = terrain.colors(100),
+     main = "DEM around Queenstown",
+     legend = TRUE)
+
+points(st_coordinates(queenstown)[1], st_coordinates(queenstown)[2],
+       pch = 19, col = "blue", cex = 1.2)
+text(st_coordinates(queenstown)[1], st_coordinates(queenstown)[2] + 0.03,
+     "Queenstown", col = "blue", cex = 1.1)
+```
+
+#### ENSO and Rainfall Patterns
+These boxplots reveal how monthly rainfall in Auckland and Queenstown responds to different phases of the El Niño–Southern Oscillation (ENSO): El Niño, La Niña, and Neutral. In Auckland, the patterns are quite clear. La Niña months tend to be wetter, with both higher medians and a wider spread of rainfall values. El Niño, on the other hand, generally brings drier conditions.
+
+In Queenstown, the story is more subtle. While some variation exists, especially during Neutral phases, the differences across ENSO types are much less pronounced. This contrast suggests that Auckland’s climate is more tightly linked to large scale ocean atmosphere dynamics, whereas Queenstown’s rainfall is shaped more by local geography and alpine weather systems than by what's happening out in the Pacific.
+
+```{r}
+# Download ENSO data (including SOI index)
+enso_data <- download_enso(climate_idx = "all", create_csv = FALSE)
+
+# Step 1: Organize ENSO data and classify
+enso_classified <- enso_data %>%
+  mutate(
+    ENSO = case_when(
+      SOI <= -1 ~ "El Niño",
+      SOI >= 1 ~ "La Niña",
+      TRUE ~ "Neutral"
+    ),
+    Year = year(Date),
+    Month = factor(month(Date), levels = 1:12, labels = month.name)
+  ) %>%
+  select(Year, Month, ENSO)
+
+# Step 2: Make sure the Month format in akl_clean matches
+akl_clean <- akl_clean %>%
+  mutate(Month = factor(Month, levels = month.name))
+
+# Step 3: Merge ENSO phase information
+akl_enso <- inner_join(akl_clean, enso_classified, by = c("Year", "Month"))
+
+# Step 4: Plot
+ggplot(akl_enso, aes(x = ENSO, y = rain, fill = ENSO)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(
+    title = "Auckland Monthly Rainfall Under Different ENSO Phases",
+    x = "ENSO Phase",
+    y = "Rainfall (mm)"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Step 1: Ensure that ENSO classification data is available for Queenstown
+qtn_enso <- qtn_clean %>%
+  mutate(Month = factor(Month, levels = month.name, ordered = FALSE)) %>%
+  inner_join(enso_classified, by = c("Year", "Month"))
+
+# Plotting: Differences in rainfall at different ENSO stages
+ggplot(qtn_enso, aes(x = ENSO, y = rain, fill = ENSO)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(
+    title = "Queenstown Monthly Rainfall Under Different ENSO Phases",
+    x = "ENSO Phase",
+    y = "Rainfall (mm)"
+  ) +
+  theme_minimal()
+```
+
+### Anomaly
+The bar plots above show standardized rainfall anomalies (Z-scores) for Auckland and Queenstown. Positive bars indicate wetter-than-average years, while negative values reflect drier conditions. Dashed red lines at ±2 standard deviations highlight extreme events.
+
+In Auckland, rainfall anomalies vary significantly across decades, with both extreme wet years and dry years. This suggests a high degree of interannual variability, likely influenced by both ENSO and local weather patterns.
+
+Queenstown displays a narrower historical range, with fewer extreme years, though 1990 and 2023 stand out as notable dry periods. Compared to Auckland, Queenstown's rainfall appears more stable over time, reinforcing the idea that its precipitation is shaped by local topographic and mesoscale factors rather than large-scale oceanic oscillations.
+
+```{r}
+# Step 1: Total annual rainfall by year Auckland
+akl_anomaly <- akl_clean %>%
+  group_by(Year) %>%
+  summarise(total_rain = sum(rain)) %>%
+  mutate(anomaly = scale(total_rain))  # Standardized outliers
+
+# Step 2: Visualize outlier bar chart
+ggplot(akl_anomaly, aes(x = Year, y = anomaly)) +
+  geom_col(fill = "steelblue", alpha = 0.7) +
+  geom_hline(yintercept = c(-2, 2), linetype = "dashed", color = "red") +
+  labs(title = "Rainfall Anomalies in Auckland (Standardized)",
+       y = "Anomaly (Z-score)", x = "Year") +
+  theme_minimal()
+```
+
+```{r}
+# Step 1. Total annual rainfall by year Queenstown
+qtn_anomaly <- qtn_clean %>%
+  group_by(Year) %>%
+  summarise(total_rain = sum(rain, na.rm = TRUE)) %>%
+  mutate(anomaly = scale(total_rain))  # Z-score Normalized outliers
+
+# Step 2. Visualize outlier bar chart
+ggplot(qtn_anomaly, aes(x = Year, y = anomaly)) +
+  geom_col(fill = "steelblue", alpha = 0.75) +
+  geom_hline(yintercept = c(-2, 2), linetype = "dashed", color = "red") +
+  labs(
+    title = "Rainfall Anomalies in Queenstown (Standardized Z-score)",
+    x = "Year", y = "Rainfall Anomaly (Z-score)"
+  ) +
+  theme_minimal()
+```
+
+### 1970-2000 avaerage rainfall January vs July
+These maps show average rainfall in January and July across New Zealand (1970–2000). In January, both Auckland and Queenstown receive relatively low rainfall, with Queenstown sitting in a distinctly dry inland zone. In July, rainfall increases across the country, with especially high values on the West Coast and moderate increases in both cities.
+
+Queenstown remains comparatively dry due to its location on the leeward side of the Southern Alps, where moist westerlies lose much of their moisture before reaching the region. Auckland, while also experiencing a winter rainfall increase, benefits from its maritime climate and consistent exposure to subtropical moisture, resulting in more even rainfall distribution year round.
+
+```{r}
+# Step 1: Download real WorldClim rainfall data (1970–2000 average, one floor per month)
+# Use geodata package to get 10 arc-min rainfall data in New Zealand
+prec_nz <- worldclim_country(country = "NZ", var = "prec", res = 10, path = tempdir())
+
+# Step 2: Remove the January rainfall layer (Floor 1)
+prec_jan <- prec_nz[[1]]  # RasterLayer: January precipitation
+
+# Step 3: Convert to data.frame for ggplot drawing
+prec_df <- as.data.frame(prec_jan, xy = TRUE)
+colnames(prec_df) <- c("lon", "lat", "rain")  # rename for clarity
+
+# Step 4: Join Auckland and Queenstown coordinates
+city_coords <- data.frame(
+  name = c("Auckland", "Queenstown"),
+  lon = c(174.7633, 168.6614),
+  lat = c(-36.8485, -45.0312)
+)
+
+city_sf <- st_as_sf(city_coords, coords = c("lon", "lat"), crs = 4326)
+
+# Step 5: Loading New Zealand borders (vector borders)
+nz <- ne_countries(scale = "medium", country = "New Zealand", returnclass = "sf")
+
+# Step 6: Plot
+ggplot() +
+  geom_raster(data = prec_df, aes(x = lon, y = lat, fill = rain)) +
+  scale_fill_viridis(name = "Rainfall (mm)", option = "D", direction = -1) +
+  geom_sf(data = nz, fill = NA, color = "black", size = 0.4) +
+  geom_sf(data = city_sf, color = "red", size = 3) +
+  geom_text(data = city_coords, aes(x = lon, y = lat, label = name),
+            color = "black", size = 4, vjust = -1.2, fontface = "bold") +
+  coord_sf(xlim = c(165, 180), ylim = c(-48, -33)) +
+  labs(
+    title = "January Rainfall in New Zealand (WorldClim 2.1)",
+    subtitle = "1970–2000 Monthly Average",
+    caption = "Data source: WorldClim via geodata package"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+prec_nz <- worldclim_country(country = "NZ", var = "prec", res = 10, path = tempdir())
+prec_jan <- prec_nz[[7]]  
+prec_df <- as.data.frame(prec_jan, xy = TRUE)
+colnames(prec_df) <- c("lon", "lat", "rain")  
+city_coords <- data.frame(
+  name = c("Auckland", "Queenstown"),
+  lon = c(174.7633, 168.6614),
+  lat = c(-36.8485, -45.0312)
+)
+city_sf <- st_as_sf(city_coords, coords = c("lon", "lat"), crs = 4326)
+nz <- ne_countries(scale = "medium", country = "New Zealand", returnclass = "sf")
+ggplot() +
+  geom_raster(data = prec_df, aes(x = lon, y = lat, fill = rain)) +
+  scale_fill_viridis(name = "Rainfall (mm)", option = "D", direction = -1) +
+  geom_sf(data = nz, fill = NA, color = "black", size = 0.4) +
+  geom_sf(data = city_sf, color = "red", size = 3) +
+  geom_text(data = city_coords, aes(x = lon, y = lat, label = name),
+            color = "black", size = 4, vjust = -1.2, fontface = "bold") +
+  coord_sf(xlim = c(165, 180), ylim = c(-48, -33)) +
+  labs(
+    title = "July Rainfall in New Zealand (WorldClim 2.1)",
+    subtitle = "1970–2000 Monthly Average",
+    caption = "Data source: WorldClim via geodata package"
+  ) +
+  theme_minimal()
+```
+
+## Reflecting and Looking Ahead
+This project deepened my understanding of how local terrain and large-scale climate drivers like ENSO interact to shape rainfall patterns across New Zealand. Working with two contrasting cities (Auckland and Queenstown) made it clear that even within one country, climate relationships can be driven by very different mechanisms. I initially expected temperature and rainfall to be closely linked, but the data challenged that assumption. Queenstown’s erratic precipitation, for instance, appears far more influenced by its mountainous setting than by seasonal warmth.
+
+The workflow itself had its bumps. I ran into issues when merging temperature and rainfall datasets, some station names didn’t align due to inconsistent formatting, and missing island classifications threw off early summaries. This reminded me just how crucial it is to standardise fields before joining datasets. On the plus side, using plotly for interactive plots made the exploration more engaging, even if the trend lines took some fiddling to get right.
+
+Looking ahead, I’d like to extend this work by including more variables, such as wind direction or sealevel pressure, and experimenting with non-linear models. Comparing a broader range of coastal and inland stations could also help test how consistent terrain effects are across Aotearoa. There’s clearly more to uncover — and I’m excited to keep digging.
+
+## Conclusion
+What began as a straightforward analysis of temperature and rainfall turned into a deeper exploration of how geography and climate variability weave together across New Zealand. Rather than chasing clear correlations, the project evolved into interpreting patterns or their absence in context.
+
+The contrast between Auckland and Queenstown served as a reminder that data never speaks in a vacuum. Interactivity helped surface nuances that static plots might miss, and layering spatial context (like elevation) alongside temporal trends added dimension to the story.
+
+Above all, the project reinforced the value of curiosity-led exploration. Not every result confirmed the hypothesis, but each raised new questions worth asking and that's arguably the most rewarding outcome of all.
+
+## Reference
+IPCC. (2021). Climate Change 2021: The Physical Science Basis. https://www.ipcc.ch/report/ar6/wg1/
+
+McClure, M. (2016, August 1). Auckland region. Te Ara – the Encyclopedia of New Zealand. https://teara.govt.nz/en/auckland-region
+
+NIWA. (n.d.). El Niño and La Niña. National Institute of Water and Atmospheric Research. Retrieved June 5, 2025, from https://niwa.co.nz/climate-and-weather/el-nino-and-la-nina
