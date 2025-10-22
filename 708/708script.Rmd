@@ -1,0 +1,179 @@
+---
+title: "data paper"
+author: "Yuehan Luo"
+date: "2025-09-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readxl)
+library(patchwork)
+
+path <- "ENVSCI 708_Data_Collaborative Research Project.xlsx"
+
+df <- read_excel(path, sheet = 1)
+
+```
+
+```{r}
+
+library(tidyverse)
+
+names(df) <- df |>
+  names() |>
+  gsub("\u00A0", " ", x = _) |>
+  trimws()
+
+df_box <- df %>%
+  mutate(
+    Habitat = case_when(
+      str_starts(tolower(`Name of location`), "forest") ~ "Forest",
+      str_starts(tolower(`Name of location`), "lawn")   ~ "Grassland",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  select(
+    Habitat,
+    `Soil temperature (°C)`,
+    `Light Intensity (μmol/m²/s)`,
+    `Soil volumetric water content (%)`
+  ) %>%
+  pivot_longer(
+    cols = -Habitat,
+    names_to = "Variable",
+    values_to = "Value"
+  ) %>%
+  drop_na(Habitat, Value)
+
+p <- ggplot(df_box, aes(x = Habitat, y = Value, fill = Habitat)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.85, width = 0.6) +
+  geom_jitter(aes(color = Habitat), width = 0.12, alpha = 0.45, size = 1.6) +
+  facet_wrap(~ Variable, scales = "free_y", nrow = 1) +
+  labs(
+    title = "Forest vs Grassland — Soil Temp / PAR / SWC",
+    x = NULL, y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top")
+
+print(p)
+```
+
+```{r}
+df_swc <- df %>%
+  mutate(
+    Habitat = case_when(
+      str_starts(tolower(`Name of location`), "forest") ~ "Forest",
+      str_starts(tolower(`Name of location`), "lawn")   ~ "Grassland",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  transmute(
+    Canopy = as.numeric(`Canopy cover (%)`),
+    SWC    = as.numeric(`Soil volumetric water content (%)`),
+    SoilTemp = as.numeric(`Soil temperature (°C)`),
+    Habitat
+  ) %>%
+  drop_na(Canopy, SWC, SoilTemp)
+
+r_txt <- tryCatch({
+  r <- cor(df_swc$Canopy, df_swc$SWC, use = "pairwise.complete.obs")
+  sprintf("Pearson r = %.2f", r)
+}, error = function(e) NULL)
+
+p_swc <- ggplot(df_swc, aes(Canopy, SWC, colour = Habitat)) +
+  geom_point(size = 2, alpha = 0.85) +
+  geom_smooth(method = "lm", se = FALSE, colour = "black", linewidth = 0.9) +
+  labs(
+    title = "Canopy cover vs Soil volumetric water content",
+    subtitle = r_txt,
+    x = "Canopy cover (%)",
+    y = "Soil volumetric water content (%)"
+  ) +
+  theme_minimal(base_size = 12)
+
+print(p_swc)
+
+
+r_txt <- tryCatch({
+  r <- cor(df_swc$Canopy, df_swc$SoilTemp, use = "pairwise.complete.obs")
+  sprintf("Pearson r = %.2f", r)
+}, error = function(e) NULL)
+
+p_temp <- ggplot(df_swc, aes(Canopy, SoilTemp, colour = Habitat)) +
+  geom_point(size = 2, alpha = 0.85) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.9, colour = "black") +
+  labs(
+    title = "Canopy cover vs Soil temperature",
+    subtitle = r_txt,
+    x = "Canopy cover (%)",
+    y = "Soil temperature (°C)"
+  ) +
+  theme_minimal(base_size = 12)
+
+print(p_temp)
+
+```
+
+```{r}
+df_gas <- df %>%
+  mutate(
+    Habitat = case_when(
+      str_starts(tolower(`Name of location`), "forest") ~ "Forest",
+      str_starts(tolower(`Name of location`), "lawn")   ~ "Grassland",
+      TRUE ~ NA_character_
+    ),
+    Canopy   = as.numeric(`Canopy cover (%)`),
+    CO2 = as.numeric(`Greenhouse gas emissions (CO2, ppm)`),
+    N2O = as.numeric(`Greenhouse gas emissions (N2O, ppm)`),
+    CH4 = as.numeric(`Greenhouse gas emissions (CH4, ppm)`)
+  ) %>%
+  drop_na(Canopy)
+
+p_co2 <- ggplot(df_gas, aes(Canopy, CO2, colour = Habitat)) +
+  geom_point(size = 2, alpha = 0.85) +
+  geom_smooth(method = "lm", se = FALSE, colour = "black") +
+  labs(x = "Canopy Cover (%)",
+       y = "CO2 (ppm)",
+       title = "Canopy Cover vs CO2 emissions") +
+  theme_minimal(base_size = 12)
+
+p_n2o <- ggplot(df_gas, aes(Canopy, N2O, colour = Habitat)) +
+  geom_point(size = 2, alpha = 0.85) +
+  geom_smooth(method = "lm", se = FALSE, colour = "black") +
+  labs(x = "Canopy Cover (%)",
+       y = "N2O (ppm)",
+       title = "Canopy Cover vs N2O emissions") +
+  theme_minimal(base_size = 12)
+
+p_ch4 <- ggplot(df_gas, aes(Canopy, CH4, colour = Habitat)) +
+  geom_point(size = 2, alpha = 0.85) +
+  geom_smooth(method = "lm", se = FALSE, colour = "black") +
+  labs(x = "Canopy Cover (%)",
+       y = "CH4 (ppm)",
+       title = "Canopy Cover vs CH4 emissions") +
+  theme_minimal(base_size = 12)
+
+
+print(p_co2)
+
+p_panel <- (p_co2 | p_n2o | p_ch4) +
+  plot_annotation(
+    title = "SWC vs Greenhouse gas emissions",
+    subtitle = "Cross-group comparison: Soil SWC (Sensor 1) vs CO2 / N2O / CH4 (other group)",
+  )
+
+print(p_panel)
+ggsave("Figure3_SWC_vs_GHG.png", p_panel, width = 12, height = 4.2, dpi = 300, bg = "white")
+
+```
+
+
+
+
+
+
