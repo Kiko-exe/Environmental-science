@@ -1,0 +1,404 @@
+---
+title: "ENVSCI 705 'Handling Environmental Data' - Problem Set 3"
+author: "Yuehan Luo & 169890290"
+output:
+  html_document: default
+---
+Answers to this problem set are due **Friday 2^nd^ May**.  Please upload the RMarkdown file via Canvas. **Submissions in other file formats will not be marked**.  You will need to use the help to answer some of these questions, but we have discussed everything here in the class (recorded) sessions. For all plots I expect axes to be labelled appropriately, etc.; otherwise all the instructions are given below. In some cases, it may make sense to log-transform axes on graphs -- you should tailor the graphs so that they communicate the information in the way you think is most effective.
+
+I have also included: (i) the head and tail of some of the data-frames and (ii) graphs as output for some of the questions as a guide -- these show you what I'm hoping you'll produce, but the goal is **not** to perfectly reproduce these (i.e., visualise the data as you see effective, use column names that you find useful).  I have suppressed some of the warning messages that you may receive.  Note that you do **not** need to submit the data files with your code -- I will have access to them.
+
+## Getting started
+We will focus on the COVID-19 outbreak using data compiled by the John Hopkins CSSE and underpinning their [interactive analysis of the pandemic](https://systems.jhu.edu/research/public-health/ncov/). You can access the data at their github repository: <https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data/csse_covid_19_time_series>
+
+Go to their website and download these three files (click on the file name, click raw, and save page from your browser): 
+- time_series_covid19_confirmed_global.csv    
+- time_series_covid19_recovered_global.csv    
+- time_series_covid19_deaths_global.csv    
+
+There is information at the website describing these data in detail. 
+
+```{r, library data & read file}
+# load the useful library here, but some library load them at the section which I should use them.
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+library(gapminder)
+
+# Read COVID-19 data set (cumulative number of confirmed cases, deaths, and recovery)
+confirmed <- read_csv("time_series_covid19_confirmed_global.csv")
+deaths <- read_csv("time_series_covid19_deaths_global.csv")
+recovered <- read_csv("time_series_covid19_recovered_global.csv")
+```
+
+## Question one - wrangle the data
+
+#### a) The first step in tidying these data is to convert them from wide to long format.
+
+Each date is currently in a separate column, but we need just one date column and one column with the number of cases in it.  So, you need to lengthen the data by collapsing the date columns into one. You should have data frames for recovered, deaths, and confirmed cases with _six_ columns.
+
+```{r, 1a (tidy data)}
+# Step 1: Convert confirmed data into long format for subsequent analysis
+cfm.long <- confirmed %>%
+  pivot_longer(
+    cols = matches("^\\d+/\\d+/\\d+$"),  
+    names_to = "date",
+    values_to = "cases"
+  ) %>%
+  mutate(date = as.Date(date, format = "%m/%d/%y"))
+
+# Step 2: View the converted data structure
+head(cfm.long)
+tail(cfm.long)
+
+```
+
+#### b) Now we need to aggregate the three case types (i.e., confirmed, recovered, death) into a single data frame to make them easier to compare (hint: `?bind_rows` and the `.id` argument).  
+
+You will also need to:    
+1. change the names of the 'Province/State' and 'Country/Region', so they don't have the special character ('/') in them (check out `clean_names()` in the janitor package for a useful solution to this)    
+2. use the lubridate package to convert the date column into date format    
+3. rename the new column formed by .id in `bind_rows` (hint: `rename`)   
+
+```{r, 1b (aggregate 3 types into single frame)}
+# Step 1: from province ot state to province_state
+confirmed <- clean_names(confirmed)
+recovered <- clean_names(recovered)
+deaths    <- clean_names(deaths)
+
+# Step 2: Convert three types of data to long format and mark as status
+confirmed_long <- confirmed %>%
+  pivot_longer(cols = starts_with("x"), names_to = "date", values_to = "cases") %>%
+  mutate(status = "Confirmed")
+
+recovered_long <- recovered %>%
+  pivot_longer(cols = starts_with("x"), names_to = "date", values_to = "cases") %>%
+  mutate(status = "Recovered")
+
+deaths_long <- deaths %>%
+  pivot_longer(cols = starts_with("x"), names_to = "date", values_to = "cases") %>%
+  mutate(status = "Mortality")
+
+# Step 3: Merge confirmed/recovered/deaths into a large table and unify the column names and formats
+all_cases <- bind_rows(confirmed_long, recovered_long, deaths_long)
+
+all_cases <- all_cases %>%
+  mutate(date = mdy(str_remove(date, "^x"))) %>% # Remove the column name prefix 'x' and convert the date
+  rename(state = province_state, country = country_region, Lat = lat, Long = long) %>%
+  select(status, state, country, Lat, Long, date, cases) # Select the required column
+```
+
+
+#### c) At this point you should have a single data frame with counts for the three case classes for all countries through time.  Show the structure and summary of this dataframe. 
+
+```{r, 1c (check the data)}
+head(all_cases)
+tail(all_cases)
+
+# structure
+str(all_cases)
+
+# summary
+summary(all_cases)
+```
+
+## Question two - visualise the data
+
+#### a) What happened in New Zealand? 
+Make a data frame with only the New Zealand COVID-19 cases. You will need to check the _state_ column to make sure your graph looks as it should (there are values for the Cook Islands separated from NZ that you need to deal with).  You will run into problems if there are multiple records with the same date and this is something to be aware of with some other nations as well.  These problems will reveal themselves as weirdly jagged or filled in plots. There are various options to deal with this issue: (i) remove the Cook Islands data with a `filter` or (ii) `group_by` states and `sum` for the country. In any case, plot the three case types through time.    
+
+```{r, 2a (NZ cases)}
+# Step 1: Filter New Zealand data and group sum by date and status
+nz_cases <- all_cases %>%
+  filter(country == "New Zealand", is.na(state) | state == "New Zealand") %>% 
+  group_by(date, status) %>%
+  summarise(total_cases = sum(cases, na.rm = TRUE), .groups = "drop") %>%
+  ungroup() # after group_by should ungroup, cancel the grouping after grouping to prevent subsequent errors
+
+# Step 2: Plot - New Zealand Case
+ggplot(nz_cases, aes(x = date, y = total_cases, color = status)) +
+  geom_line() + 
+  labs(title = "COVID-19 in New Zealand",
+       x = "Date",
+       y = "Number of cases",
+       color = "Case type") +
+  theme_minimal()
+
+# Step 3: Use log scale to view case trends in New Zealand
+ggplot(nz_cases, aes(x = date, y = total_cases, color = status)) +
+  geom_line() + 
+  scale_y_log10() + 
+  labs(title = "COVID-19 in New Zealand (Log Scale)",
+       x = "Date",
+       y = "Number of cases (log scale)",
+       color = "Case type") +
+  theme_minimal()
+```
+
+
+#### b) Repeat 2(a) but showing New Zealand, China, USA (coded US in the data), Australia, Germany, Italy, Spain, Canada, Iran, France, and South Korea. 
+
+```{r, 2b (selcted countries)}
+# Step 1: Set a list of countries to follow
+countries_of_interest <- c("New Zealand", "China", "US", "Australia", "Germany", 
+                           "Italy", "Spain", "Canada", "Iran", "France", "Korea, South")
+
+# Step 2: Filter the data for the selected countries and aggregate across provinces/states if necessary
+country_cases <- all_cases %>%
+  filter(country %in% countries_of_interest) %>%
+  group_by(country, status, date) %>%
+  summarise(total_cases = sum(cases, na.rm = TRUE), .groups = "drop") %>% # Summing cases for each country, date, and status
+  ungroup()
+
+# Step 3: Plot the data (log scale + facet image)
+ggplot(country_cases, aes(x = date, y = total_cases, color = country)) +
+  geom_line() +
+  scale_y_log10() +  # Apply log scale to y-axis
+  facet_wrap(~ status, scales = "free_y") +  # Facet by case status (confirmed, recovered, dead)
+  labs(title = "COVID-19 Cases by Country (Log Scale)",
+       x = "Date",
+       y = "Number of cases (log scale)",
+       color = "Country") +
+  theme_minimal()
+```
+
+#### c) Now, select ten countries _at random_ (hint: `?unique` and `?sample`) and produce a plot as per 2(b). 
+
+```{r, 2c (random countries)}
+# Step 1: Select 10 random countries from the unique list of countries
+set.seed(123)  # Set seed for reproducibility
+random_countries <- sample(unique(all_cases$country), 10)
+
+# Step 2: Filter the data for the randomly selected countries and aggregate across provinces/states if necessary
+country_cases_random <- all_cases %>%
+  filter(country %in% random_countries) %>%
+  group_by(country, status, date) %>%
+  summarise(total_cases = sum(cases, na.rm = TRUE), .groups = "drop") %>% # Summing cases for each country, date, and status
+  ungroup()
+
+# Step 3: Plot the data - random country trends
+ggplot(country_cases_random, aes(x = date, y = total_cases, color = country)) +
+  geom_line() +
+  scale_y_log10() +  # Apply log scale to y-axis
+  facet_wrap(~ status, scales = "free_y", strip.position = "bottom") +  # Facet by case status (confirmed, recovered, dead)
+  labs(title = "COVID-19 Cases by Country (Randomly Selected) (Log Scale)",
+       x = "Date",
+       y = "Number of cases (log scale)",
+       color = "Country") +
+  theme_minimal()
+```
+
+#### d) Using an appropriate join merge the gapminder data and your COVID information so that you can visualise the pandemic's dynamics _by continent_.
+
+Note that in the COVID data the United States are coded "US" but in gapminder they are coded as "United States", so you will need to recode the gapminder version. There are some countries in the COVID data that are not in the gapminder data and _vice versa_ - do **not** worry about these for now (they should code as `NA`s that you can filter out / omit if you want) - this will produce warnings but you can ignore these! You may want to use `filter` on the gapminder data so that you are dealing with just a single year (2007 is fine).
+
+
+```{r, joint continet}
+library(countrycode)
+
+# Use the countrycode package to add context information
+all_cases <- all_cases %>%
+  mutate(continent = countrycode(country, "country.name", "continent")) %>%
+  filter(!is.na(continent))
+```
+
+```{r, 2d (continent figure)}
+# Step 1: Extract data from 2007 in gapminder and change the name (US vs United States)
+gapminder_2007 <- gapminder %>%
+  filter(year == 2007) %>%
+  mutate(country = ifelse(country == "United States", "US", country))
+
+# Step 2: Merge the data of the context and gapminder (through the context)
+merged_data <- all_cases %>%
+  left_join(gapminder_2007, by = "continent")
+
+# Step 3: Summary of the number of cases per continent
+continent_cases <- merged_data %>%
+  group_by(continent, status, date) %>%
+  summarise(sum.cases = sum(cases), na.rm = TRUE, .groups = "drop") %>%
+  ungroup()
+print(head(continent_cases, 6))
+print(tail(continent_cases, 6))
+
+# Step 4: Plot
+ggplot(continent_cases, aes(x = date, y = sum.cases, color = status)) +
+  geom_line() +
+  scale_y_log10() +
+  facet_wrap(~continent, scales = "free_y") +
+  labs(x = "Date", y = "Cases (log scale)", color = "Status") +
+  theme_minimal()
+```
+
+## Question 3 - Using population data to express the pandemic dynamics as _per capita_ values
+
+```{r, q3 load library & read file}
+# Load the necessary package
+library(readxl)
+
+# Step 1: Load the population data from the World Bank Excel file
+pop_data <- read_xlsx("Extract_From_Population_estimates_and_projections.xlsx", n_max=267)
+head(pop_data)
+```
+
+#### a) Use WorldBank data to esimate _per capita_ pandemic rates
+I have uploaded data to Canvas with population size in 2023 for the countries of the world (sourced from: https://databank.worldbank.org/source/population-estimates-and-projections#).  The file is at: 
+https://canvas.auckland.ac.nz/files/14511088/download?download_frd=1
+As first steps to using these data you will need to:    
+1. load them: they are a .xlsx file, so you will need the readxl package (hint: have a look at the bottom of the table in the xlsx file and then look at the `n_max` argument in `read_xlsx`)
+
+2. rename the columns to be more usable if you wish (drop spaces, etc.)
+
+3. if it is not already, coerce _pop2021_ to be numeric 
+
+4. change United States to US in the country name (as per 2d)
+
+```{r, 3a (prepare data)}
+# Step 1: rename the columns to be more usable
+colnames(pop_data) <- gsub("Country Name", "country", colnames(pop_data))  
+colnames(pop_data) <- gsub("Country Code", "ccode", colnames(pop_data))  
+colnames(pop_data) <- gsub("2023 \\[YR2023\\]", "pop2023", colnames(pop_data))
+
+# Step 2: Select and display only 'country', 'ccode', and 'pop2023' columns
+pop_data <- pop_data %>%
+  select(country, ccode, pop2023) %>%
+  mutate(pop2023 = as.numeric(pop2023))%>%
+  mutate(country = ifelse(country == "United States", "US", country))
+
+# Step 3: View the resulting table
+head(pop_data)
+tail(pop_data)
+
+```
+
+#### b) Make a new data frame by joining the population data with the COVID data so there's a column with the population size for each country.
+```{r, 3b (check data)}
+# Step 1: Use left_join combine population data into COVID data
+covid_pop <- all_cases %>%
+  left_join(pop_data %>% select(country, pop2023), by = "country")
+
+# Step 2: Check
+head(covid_pop)
+tail(covid_pop)
+```
+
+#### c) Plot the NZ pandemic dynamics as cases _per capita_ (i.e., cases / population) in each disease class (infected, recovered, death).
+```{r, 3c (NZ cases per capita)}
+# Step 1: Filter New Zealand data and calculate the number of cases per capita
+nz_data <- covid_pop %>%
+  filter(country == "New Zealand", is.na(state) | state == "New Zealand") %>% 
+  group_by(status, date) %>%
+  mutate(cases_per_capita = cases / pop2023) %>%
+  filter(!is.na(cases_per_capita))  %>% 
+  ungroup()
+
+# Step 2: Plot - changes in cases per capita
+ggplot(nz_data, aes(x = date, y = cases_per_capita, color = status)) +
+  geom_line() +
+  scale_y_log10() +
+  labs(x = "Date", y = "Cases per capita", color = "Status") +
+  theme_minimal()
+```
+
+#### d)  Repeat 2(b) but showing _per capita_ case counts. Facet the temporal dynamics by disease class.
+```{r, 3d (selected countries per capita case counts)}
+# Step 1: Specify a list of countries of interest that will be used for subsequent epidemic analysis
+countries_of_interest <- c("New Zealand", "China", "US", "Australia", "Germany", 
+                           "Italy", "Spain", "Canada", "Iran", "France", "Korea, South")
+
+# Step 2: Filter out the data of the above countries, group them by country, status, and date, and calculate the total number of cases
+country_cases_pc <- covid_pop %>%
+  filter(country %in% countries_of_interest) %>%
+  group_by(country, status, date, pop2023) %>%
+  summarise(total_cases = sum(cases, na.rm = TRUE), .groups = "drop") %>%
+  mutate(cases_per_capita = total_cases / pop2023) %>%
+  ungroup()
+
+# Step 3: Plot
+ggplot(country_cases_pc, aes(x = date, y = cases_per_capita, color = country)) +
+  geom_line() +
+  facet_wrap(~ status, scales = "free_y") +
+  labs(title = "COVID-19 Cases per Capita by Country",
+       x = "Date",
+       y = "Cases per capita",
+       color = "Country") +
+  theme_minimal()
+```
+
+
+#### e) Produce a graph as per 2c, but showing cases _per capita_.
+Being able to select the same countries is important in terms of reproducibility, but you **don't** need to do it for this exercise.
+```{r, 3e (random per capita)}
+# Step 1: Select 10 random countries from the unique list of countries
+set.seed(123)  # Set seed for reproducibility
+random_countries <- sample(unique(all_cases$country), 10)
+
+# Step 2: Filter the data for the randomly selected countries and merge with population data
+country_cases_random <- all_cases %>%
+  filter(country %in% random_countries) %>%
+  left_join(pop_data, by = "country") %>%  # Merge with population data
+  mutate(cases_per_capita = cases / pop2023) %>%  # Calculate cases per capita
+  group_by(country, status, date) %>%
+  summarise(total_cases_per_capita = sum(cases_per_capita, na.rm = TRUE), .groups = "drop")  # Summing cases per capita for each country, date, and status
+
+# Step 3: Plot the data
+ggplot(country_cases_random, aes(x = date, y = total_cases_per_capita, color = country)) +
+  geom_line() +
+  facet_wrap(~ status, scales = "free_y", strip.position = "bottom") +  # Facet by case status (confirmed, recovered, dead)
+  labs(title = "COVID-19 Cases per Capita by Country (Randomly Selected)",
+       x = "Date",
+       y = "Cases per Capita",
+       color = "Country") +
+  theme_minimal()
+```
+
+
+#### f) And finally _per capita_ dynamics at the continent level. 
+We want the total cases per continent expressed _per capita_, which will require you to have for each date the number of cases of each disease class in each continent and the total population for the continent.  This requires a few  steps, so break the problem down (e.g., write the steps out on paper or as comments) and work through it logically testing each step along the way. If you can do this you can do everything you'll need to to manipulate most wild-caught data you'll encounter!
+
+```{r, 3f (continent per capita)}
+# Step 1: Match each country to its continent for subsequent continental aggregation analysis
+all_cases <- all_cases %>%
+  mutate(continent = countrycode(country, "country.name", "continent")) %>%
+  filter(!is.na(continent))
+print(head(all_cases, 6))
+print(tail(all_cases, 6))
+
+# Step 2: Also add continuous information to population data to facilitate the summary of the subsequent total population of mainland China
+pop_data <- pop_data %>%
+  mutate(continent = countrycode(country, "country.name", "continent")) %>%
+  filter(!is.na(continent))
+print(head(pop_data[, c("country", "continent", "pop2023")], 6))
+
+# Step 3: Total number of cases per continent, case status and date
+continent_cases <- all_cases %>%
+  group_by(continent, status, date) %>%
+  summarise(total_cases = sum(cases), .groups = "drop") %>%
+  ungroup()
+print(head(continent_cases, 6))
+
+# Step 4: Calculate the total population of each continent
+continent_population <- pop_data %>%
+  group_by(continent) %>%
+  summarise(continent_population = sum(pop2023, na.rm = TRUE), .groups = "drop") %>%
+  ungroup()
+print(continent_population)
+
+# Step 5: Combine the number of cases with population data and calculate the number in each continent
+continent_data <- continent_cases %>%
+  left_join(continent_population, by = "continent") %>%
+  mutate(cases_per_capita = total_cases / continent_population)
+print(head(continent_data, 6))
+
+# Step 6: Plot
+ggplot(continent_data, aes(x = date, y = cases_per_capita, color = status)) +
+  geom_line() +
+  facet_wrap(~continent, scales = "free_y") +
+  labs(title = "COVID-19 Cases per Capita at Continental Level",
+       x = "Date",
+       y = "Cases per Capita",
+       color = "Case Type") +
+  theme_minimal()
+```
+

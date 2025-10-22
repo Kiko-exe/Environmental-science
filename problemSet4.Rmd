@@ -1,0 +1,243 @@
+---
+title: "ENVSCI 705 'Handling Environmental Data' - Problem Set 4"
+author: "Yuehan Luo & 169890290"
+output:
+  html_document: null
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Answers to this problem set are due **Friday 16th May**.  Please upload the RMarkdown file via Canvas. **Submissions in other file formats will not be marked**.  You will need to use the help to answer some of these questions, but we have discussed everything here in the class (recorded) sessions. For all plots I will expect axes to be labelled appropriately, etc.; otherwise all the instructions are given below.
+
+```{r, download}
+# Step: Download the libraries which I need in this problem set.
+library(terra)
+library(tidyverse)
+library(tidyterra)
+library(maps)
+library(ggplot2)
+library(rgbif)
+library(dplyr)
+library(rnaturalearth)   # Download map outline data
+library(rnaturalearthdata)
+library(sf)
+# library(patchwork) if in the last one want to show the figure each graph has its own title and y-axis can use this one
+```
+
+## Problem one - visualising the climate space of the 50 most populous global cities
+
+For this problem you need to produce a plot with the 50 largest cities (population size) identified in climate space (temperature vs. rainfall).  You can get climate data from worldclim [worldclim website](https://worldclim.org/data/bioclim.html). The five-minute resolution data is fine, but be aware this is a largish download (c 180 MB); you may already have these data from the lecture on handling raster data and I have also [stored it on Canvas](https://canvas.auckland.ac.nz/files/14511104/download?download_frd=1). Information on world cities is available in the free ('basic') data city size from [SimpleMaps](https://simplemaps.com/data/world-cities) or you can use the world.cities data in the maps library (up to you). The steps you will need to go through are:
+
+1. Download the climate data; see the [raster lecture](http://spatialecol.com/teaching/envsci705/geospatial/raster.html))
+
+```{r,ReadTheFile}
+# Get a vector of all of the bio files in the directory
+bioclim.files <- list.files("~/Downloads/wc5", pattern = "bio", full.names = TRUE)
+clim <- rast(x = bioclim.files)
+```
+
+2. Make a data frame with the 50 largest (based on population) cities in the world (using the simplemaps data or the world.cities data from the maps package)
+
+```{r,50LargestCitiesData}
+# Step 1: load the data
+data("world.cities")
+
+# Step 2: Sort by population and select the top 50 cities
+top_50_cities <- world.cities %>%
+  arrange(desc(pop)) %>%
+  slice_head(n = 50)
+
+# Step 3: Check the data
+head(top_50_cities)
+```
+3. To make life easier for yourself, you might (not mandatory!)  want to rename the variables in the worldclim raster to drop the information about wordclim and resolution; so, for example: wc2.1_5m_bio_1 → bio_1.
+
+```{r,RenameTheVariables}
+# rename wc2.1_5m_ to bio_x
+names(clim) <- gsub("wc2.1_5m_", "", names(clim))
+
+# check new name
+names(clim)
+```
+
+4. Extract temperature and rainfall (variables bio1 and bio12 in worldclim) for a large (say, 1e4) number of points randomly scattered across the Earth's surface. Note that this will, by default, include oceans; if you only want the *terrestrial* surface you'll need to check the `na.rm` argument in `spatSample`.
+
+```{r,Random}
+# Step 1: Stay reproducible
+set.seed(123)  
+# Step 2: Use spatSample to extract 1e4 random points from raster data and exclude oceans
+pts <- spatSample(clim, size = 10000, method = "random", na.rm = TRUE, xy = TRUE)
+```
+
+5. Extract temperature and rainfall for the 50 largest cities (note that the world.cities dataset has the latitude and longitude).
+
+```{r}
+# Step 1: Convert city to vector object (SpatVector)
+city_vect <- vect(top_50_cities[, c("long", "lat")], geom = c("long", "lat"))
+
+# Step 2: Extract climate data (bio1 and bio12)
+city_clim <- terra::extract(clim[[c("bio_1", "bio_12")]], city_vect)
+
+# Step 3: Merge into city table
+city_clim_df <- bind_cols(top_50_cities, city_clim[, -1])
+
+# Step 4: Check the results
+head(city_clim_df)
+```
+
+6. Produce the plot of those 50 cities' locations in climate spacewith the background points from [4] (as ever, this is **not** an exercise in perfect reproduction!)
+```{r}
+ggplot() +
+  geom_point(data = pts, aes(x = bio_1, y = bio_12), alpha = 0.1, color = "gray") + # Draw background random climate points
+  geom_point(data = city_clim_df, aes(x = bio_1, y = bio_12), color = "red") + # Map the climate points of 50 cities
+  geom_text(data = city_clim_df[1:15, ], aes(x = bio_1, y = bio_12, label = name), size = 3, hjust = 0.5, vjust = 0.5) + # Mark the top 15 cities
+  labs(x = "Mean annual temperature °C (bio_1)", y = "Annual rainfall (mm)(bio_12)", title = "Plot of 50 largest cities in climate space (temperature vs. precipitation) - 15 cities at random to label") + # Set the axis label and title
+  theme_minimal() 
+```
+
+## Problem two - map the distribution of an Aotearoa-NZ tree species and its climate envelope
+
+For this problem you need to produce a plot of the distribution of a native plant species in Aotearoa-NZ and then look at the climate conditions it occurs in relative to those across NZ as a whole (this provides a rough view of the species 'climate envelope'). The steps you will need to go through are:
+
+1. Select **one** of the following Aotearoa-NZ native tree species:
+- _Phyllocladus trichomanoides_ (tanekaha)   
+- _Prumnopitys taxifolia_ (matai)    
+- _Sophora microphylla_ (kowhai)    
+- _Dicksonia fibrosa_ (wheki)    
+- _Dracophyllum traversii_ (neinei)    
+- _Leionema nudum_ (mairehau)
+- _Lophomyrtus bullata_ (ramarama)
+- _Knightia excelsa_ (rewarewa)    
+- _Pseudopanax crassifolius_ (horoeka; lancewood)    
+
+```{r, which I choose}
+# Step: Select on NZ native tree species
+species_name <- "Sophora microphylla"
+```
+
+2. Get location (i.e., latitude and longitude) data for the species you select from [GBIF](https://www.gbif.org/).  You can either download this through the GBIF website or better (!) use the `rgbif` package ([see tutorial](https://docs.ropensci.org/rgbif/articles/rgbif.html)).  If you use the `rgbif` package, the key command is `occ_search` (see this [vignette](https://docs.ropensci.org/rgbif/articles/getting_occurrence_data.html)).  For species with many records you can use the limit argument in `occ_data` to limit the download number.  Note this does **not** just return a data-frame so check the value component of `?occ_data`.  You might want to downlaod the data and store locally while testing the code, otherwise you will be pinging the GBIF website repeatedly.
+
+```{r}
+# Step 1: Get some occurrences using the search API
+occ <- occ_data(scientificName = species_name,
+                country = "NZ",        
+                hasCoordinate = TRUE,  
+                limit = 2000)
+occ_data_df <- occ$data
+
+# Step 2: Preview the first few lines
+head(occ_data_df)
+
+# Step 3: Simplify and retain necessary columns
+species_locs <- occ_data_df %>%
+  select(decimalLatitude, decimalLongitude, eventDate, basisOfRecord) %>%
+  rename(lat = decimalLatitude, lon = decimalLongitude)
+
+# Step 4: Check
+head(species_locs)
+```
+
+3. For some species there will be records from outside Aotearoa-NZ (e.g., in botanic gardens) that you will need to filter out (use the _countyCode_ variable).  There may also be outliers in Aotearoa-NZ (e.g., kauri growing in the southern South Island), don't worry about these.
+
+```{r}
+# Step 1: Clean up species distribution data and filter out records that are not in New Zealand
+species_locs_clean <- occ$data %>%
+  filter(
+    countryCode == "NZ", # Limited country to New Zealand
+    !is.na(decimalLatitude), # Must have latitude
+    !is.na(decimalLongitude), # Must have longitude
+  ) %>%
+  filter(
+    decimalLongitude >= 165, decimalLongitude <= 180,
+    decimalLatitude >= -48, decimalLatitude <= -33 # Limited to New Zealand's local geographical scope (use this because I realise there are still have data outside NZ)
+  ) %>%
+  select(
+    decimalLatitude, decimalLongitude, eventDate, basisOfRecord
+    # Only important columns are retained
+  ) %>%
+  rename(
+    lat = decimalLatitude, lon = decimalLongitude
+    # Change the column name to facilitate subsequent calls
+  )
+
+# Step 2: Check the first few lines of data after cleaning to confirm that the processing is correct
+head(species_locs_clean)
+```
+
+4. Extract mean annual temperature (_bio1_), seasonality (_bio4_) and precipitation (_bio12_) for the locations where the species occurs and for random points across NZ (land surface only) as a whole; this is similar to problem one but you will need to `crop` the global worldclim data to Aotearoa-NZ.
+
+```{r}
+# Step 1: Load the New Zealand shapefile for cropping
+nz_land <- ne_countries(scale = "medium", country = "New Zealand", returnclass = "sf")
+
+# Step 2: Crop the WorldClim raster data to New Zealand
+clim_nz <- crop(clim, ext(nz_land))  # Crop based on NZ's extent
+
+# Step 3: Extract climate data (bio_1, bio_4, bio_12) for species locations
+species_clim <- terra::extract(clim_nz[[c("bio_1", "bio_4", "bio_12")]], vect(species_locs_clean[, c("lon", "lat")]), method = "bilinear")
+
+# Step 4: Add species type to the data
+species_clim_df <- bind_cols(species_locs_clean, species_clim)
+species_clim_df$type <- "kowhai"  # Add the species name to the type column
+
+# Step 5: Generate random points (only land)
+set.seed(456)
+random_pts <- spatSample(clim_nz, size = 2000, method = "random", na.rm = TRUE, xy = TRUE)
+
+# Step 6: Convert to ensure it is a spatial object
+random_pts_spat <- vect(random_pts, geom = c("x", "y"))
+
+# Step 7: Extract climate data for the random points
+random_clim <- terra::extract(clim_nz[[c("bio_1", "bio_4", "bio_12")]], random_pts_spat, method = "bilinear")
+
+# Step 7: Create a data frame for random points
+random_clim_df <- as.data.frame(random_clim)
+random_clim_df$type <- "rnd"  # Label as random points
+
+# Step 8: Combine the species and random climate data
+combined_clim_df <- bind_rows(species_clim_df, random_clim_df)
+combined_clim_df <- combined_clim_df[, c("ID", "bio_1", "bio_4", "bio_12", "type")]
+
+# Step 9: Check the final combined data
+head(combined_clim_df)
+tail(combined_clim_df)
+```
+
+5. Plot the distribution of the observations of your selected species across Aotearoa-NZ.
+```{r}
+# Step: Plot figure of Species distribution map with map outline
+ggplot(data = nz_land) +
+  geom_sf(fill = "white", color = "black") + # Draw a New Zealand border map
+  geom_point(data = species_locs_clean, # Add to species distribution points
+             aes(x = lon, y = lat), 
+             color = "blue") +
+  coord_sf(xlim = c(165, 180), ylim = c(-48, -33), expand = FALSE) +  # Limited view range
+  labs(x = "Longitude", y = "Latitude", 
+       title = "Species Distribution in New Zealand") + 
+  theme_minimal() 
+```
+
+6. Visualise the three climate variables for NZ as a whole and those for the species locations so that they can be compared (there are many ways to do this: histograms, density plots, side-by-side box-plots, violin plots, bean-plots, or jitter-plots).
+
+```{r}
+combined_clim_long <- combined_clim_df %>%
+  pivot_longer(cols = starts_with("bio"), names_to = "bio_variable", values_to = "value") %>%
+  mutate(bio_variable = recode(bio_variable,
+                               "bio_1" = "Mean Annual Temperature (bio1) in °C",
+                               "bio_4" = "Temperature Seasonality (bio4) in temp SD x 100",
+                               "bio_12" = "Annual Precipitation (bio12) in mm"))
+
+# Step: Create a jitter plot for each bio variable (bio_1, bio_4, bio_12)
+ggplot(combined_clim_long, aes(x = type, y = value, color = bio_variable)) +
+  geom_jitter(width = 0.1, height = 0.1, alpha = 0.5) +
+  facet_wrap(~ bio_variable, scales = "free_y") +  # Separate plot for each bio variable
+  labs(title = "Climate Envelope for Kowhai and Random Points",
+       x = "Type (Kowhai vs Random)",
+       y = "Climate Variable Value") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 6.5)) 
+```
+
