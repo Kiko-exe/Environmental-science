@@ -1,0 +1,457 @@
+---
+title: "ENVSCI 705 'Handling Environmental Data' - Problem Set 2"
+author: "Yuehan Luo & upi:yluo862"
+output:
+  html_document:
+    df_print: paged
+header-includes: \usepackage{xcolor}
+urlcolor: blue
+---
+
+Answers to this problem set are due **Friday 4^th^ April**.  Please upload the RMarkdown file via Canvas. **Submissions in other file formats will not be marked**.  You will need to use the help to answer some of these questions, but we have discussed nearly everything here in the recorded sessions up to and including the material on dplyr and tidyr. Insert the code chunks and remember to name them, and use comments in the code.  For all plots, label axes as appropriately, etc.; otherwise all the instructions are given below.  Where you are asked for comments, add these as Markdown text.
+
+In the following, I have used _italics_ for variable (column) names, **bold** for data frames, and used the standard formatting for R code.
+
+I have also included examples of the graphs for some of the questions as a guide -- these show you what I'm hoping you'll produce. Your goal is **not** to perfectly reproduce these!  Note, I have suppressed some of the warning messages that you are likely to receive.
+
+All of the data sets you will need are included with the [_ltersampler_ package](https://lter.github.io/lterdatasampler/).  You can install it in the usual way through RStudio.
+
+```{r}
+# load needed library here
+library(lterdatasampler)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(tidyr)
+library(patchwork)
+library(gridExtra)
+```
+
+### Question one    
+Load the `ltersampler` package.  Load the **and_vertebrates** data frame, which contains count and size data for cutthroat trout and salamanders in clear-cut or old-growth forest in Mack Creek, Andrews Forest LTER.
+
+a. Show a summary of the **and_vertebrates** data frame.
+
+b. Add a column called _month_ derived from the _sampledate_ column (hint: check out the lubridate package; reduce _sampledate_ to just the month)
+
+c. Calculate and show the following statistics on the _length_1_mm_ variable for Coastal giant salamander only (use the _species_ variable): maximum, mean, median, 5% percentile, 95% percentile, and sample size (count)). You will need to work out what to do about the NA values (hints: `drop_na` and `na.rm = TRUE`).
+
+e. Calculate the number of Cutthroat trout sampled and their median _weight_g_ in each year.  Arrange the output by descending median _weight_g_.
+
+f. How long is the longest Cutthroat trout in the data frame, how much heavier than the median weight is it, and what year was it sampled in? Make a box-plot of the length (_length_1_mm_) of the trout in each year. Again, you'll need to deal with the NAs.
+
+g. Produce a faceted plot of the length-mass (_length_1_mm_ vs. _weight_g_) relationship for the three species in the **and_vertebrates** data.
+
+```{r question 1}
+
+data("and_vertebrates")
+
+# a.
+summary(and_vertebrates)
+
+# b.
+and_vertebrates <- and_vertebrates %>%
+  mutate(month = month(sampledate, label = TRUE))
+
+# c. 
+salamander_stats <- and_vertebrates %>% 
+  filter(species == "Coastal giant salamander") %>% 
+  drop_na(length_1_mm) %>% 
+  summarise(max_length = max(length_1_mm, na.rm = TRUE), 
+            mean_length = mean(length_1_mm, na.rm = TRUE), 
+            median_length = median(length_1_mm, na.rm = TRUE), 
+            percentile_5 = quantile(length_1_mm, 0.05, na.rm = TRUE), 
+            percentile_95 = quantile(length_1_mm, 0.95, na.rm = TRUE), 
+            sample_size = n())
+
+print(salamander_stats)
+
+# e.
+trout_stats <- and_vertebrates %>% 
+  filter(species == "Cutthroat trout") %>% 
+  drop_na(weight_g) %>% 
+  group_by(year = year(sampledate)) %>% 
+  summarise(count = n(), median_weight = median(weight_g)) %>% 
+  arrange(desc(median_weight))
+
+print(trout_stats)
+
+# f.
+longest_trout <- and_vertebrates %>% 
+  filter(species == "Cutthroat trout") %>% 
+  drop_na(length_1_mm, weight_g) %>% 
+  arrange(desc(length_1_mm)) %>% 
+  slice(1)  # Get the longest trout
+
+overall_median_weight <- median(and_vertebrates$weight_g, na.rm = TRUE)
+weight_difference <- longest_trout$weight_g - overall_median_weight
+
+print(longest_trout)
+print(paste("Weight difference:", weight_difference))
+
+ggplot(and_vertebrates %>% filter(species == "Cutthroat trout"), aes(x = factor(year(sampledate)), y = length_1_mm)) + geom_boxplot() + labs(x = "Year", y = "Length (mm)", title = "Cutthroat Trout Length by Year") +  theme_minimal() + scale_x_discrete(breaks = as.character(seq(1990, 2020, by = 10)), labels = seq(1990, 2020, by = 10))
+
+
+# g. 
+and_vertebrates_clean <- and_vertebrates %>% filter(!is.na(species))  # Delete the line of NA
+
+ggplot(and_vertebrates_clean, aes(x = weight_g, y = length_1_mm)) + geom_point(alpha = 1, color = "black") + facet_wrap(~species, nrow = 1) + labs(x = "Weight (g)", y = "Length (mm)") + theme_minimal()
+```
+
+### Question two
+
+Load the **luq_streamchem** data frame (in `ltersampler`), which describes stream chemistry data from Quebrada Sonadora in Puerto Rico (1987-1992).  Hurricane Hugo hit this site on 18-09-1989.  
+
+a. It will be much easier (although not absolutely required) if we pivot these data from wide to long format (i.e., from the 20 columns each with a variable to four columns, two  with the ID variables (_sample_id_ and _sample_date_), the third the variable value, and the fourth the value for that variable.
+
+b. Having pivoted the data, look at the completeness of the monitoring for the 19 measured variables. Make a bar plot of the number of NAs in each of those 19 variables arranged (hint: you could use `sum` and `is.na` for this) with the percentage missing as text above the bar (hint: use `geom_text` and the `vjust` argument).
+
+c. Plot the temporal dynamics of the following variables (i.e., variable on the y-axis and time on the x-axis) as a facet plot: _cond_, _k_, _mg_, _na_, _no3_n_, _temp_, _tss_.  You should use a combination of `filter` and  `%in%` statements to select the variables of interest. Include a smoother on each facet.  
+
+d. For the same variables as in 2c, plot the mean values of each variable in each month with years delineated by colour.  There are a few ways you could choose to show this, including line plots, bar plots, jitter plots, etc.  However you do this, there are a few steps involved, so breakdown the problem into its component parts and solve them one-by-one.
+
+e. The site these data were collected from was affected by Hurricane Hugo, which made landfall in early September 1989 (18th).  Produce a plot as per 2c but with a vertical line at the date of the hurricane and the variables having different colours before and after the hurricane occurred.
+
+f. So, how large were these changes in water chemistry?  Make violin plots with data points superimposed as a jitter of the time before the hurricane and 12 months after the event.  Then, make a table showing the mean, standard deviation, and % change in each of the six variables during that 12 month period compared to the pre-hurricane values.
+
+```{r question 2}
+
+data("luq_streamchem") # Load the data
+
+# a.
+luq_streamchem_long <- luq_streamchem %>% 
+  pivot_longer(cols = -c(sample_id, sample_date), names_to = "variable", values_to = "value")
+
+# b. 
+na_counts <- luq_streamchem_long %>% 
+  group_by(variable) %>% 
+  summarise(na_count = sum(is.na(value)), total_count = n(), percent_missing = (na_count / total_count) * 100) 
+# Calculate the number of missing values, total rows, and percentage of missing values for each variable
+
+# alphabetic ordering
+ggplot(na_counts, aes(x = factor(variable, levels = sort(unique(variable))), y = na_count)) + geom_bar(stat = "identity", fill = "darkgrey") + geom_text(aes(label = paste0(round(percent_missing, 1)), vjust = -0.5)) + labs(x = "Variable", y = "Count", title = "Number of Missing Data by Variable") + theme_minimal()
+
+# c.
+selected_variables <- c("cond", "k", "mg", "na", "no3_n", "temp", "tss") # Select the variables to be analysed
+
+# temporal dynamics
+ggplot(luq_streamchem_long %>% 
+         filter(variable %in% selected_variables), 
+       aes(x = sample_date, y = value)) + 
+  geom_line() + 
+  geom_smooth(method = "loess", color = "blue", se = FALSE) + 
+  facet_wrap(~ variable, scales = "free_y") + 
+  labs(x = "Water chemistry variable", y = "Value", title = "Temporal Dynamics of Selected Variables") +
+  theme_minimal()
+
+# d.
+monthly_means <- luq_streamchem_long %>%
+  filter(variable %in% selected_variables) %>%
+  mutate(year = year(sample_date), month = month(sample_date)) %>%  # get the month
+  group_by(variable, year, month) %>%
+  summarise(mean_value = mean(value, na.rm = TRUE), .groups = "drop") # na.rm can make the graph continue, if delect na.rm can get the same daigram in set2 pdf
+
+# Draw a time trend chart of the average value calculated by month each year and distinguish the years by different colors
+ggplot(monthly_means, aes(x = month, y = mean_value, group = year, color = as.factor(year))) +
+  geom_line() +
+  facet_wrap(~ variable, scales = "free_y") +
+  scale_x_continuous(breaks = 1:12) +  # only show 1-12, it's easy to see
+  labs(x = "Month", y = "Mean Value", title = "Monthly Mean Values by Year", color = "Year") +
+  theme_minimal()
+
+#e.
+# marking the data for "Before" and "After"
+luq_streamchem_long$sample_date <- as.Date(luq_streamchem_long$sample_date)
+hurricane_date <- as.Date("1989-09-18")
+luq_streamchem_long <- luq_streamchem_long %>% mutate(hurricane_period = ifelse(sample_date < hurricane_date, "Before", "After"))
+
+selected_variables <- c("cond", "k", "mg", "na", "no3_n", "temp", "tss")
+filtered_data <- luq_streamchem_long %>% filter(variable %in% selected_variables) 
+
+ggplot(filtered_data, aes(x = sample_date, y = value, color = hurricane_period)) + geom_line() + geom_vline(xintercept = hurricane_date, linetype = "dashed", color = "black") + facet_wrap(~ variable, scales = "free_y") + labs(x = "Date", y = "Value", title = "Affected by Hurricane Hugo which Made Landfall in Early September 1989 (compare before and after Hugo)") + scale_color_manual(values = c("Before" = "darkred", "After" = "darkgreen")) + theme_minimal() 
+
+
+# f.
+luq_filtered <- luq_streamchem %>%
+  mutate(post_hugo = ifelse(sample_date < hurricane_date, TRUE, FALSE)) %>%
+  gather(key = "variable", value = "value", selected_variables)  # Select column
+
+luq_filtered$post_hugo <- factor(luq_filtered$post_hugo, levels = c(TRUE, FALSE), labels = c("Before", "After"))
+
+# Use violin diagrams and scatter diagrams to compare the distribution of each variable before and after the hurricane and color them by different time periods
+ggplot(luq_filtered, aes(x = post_hugo, y = value, color = post_hugo)) +
+  geom_violin(alpha = 0.5) +  # Set violin diagram transparency
+  geom_jitter(width = 0.2, alpha = 0.5) +  # Add scatter plots and set transparency
+  facet_wrap(~ variable, scales = "free_y") +  # Use facet_wrap to display each variable
+  labs(x = "Post-Hurricane", y = "Value", title = "Stream Chemistry Variables Pre- and Post-Hurricane Hugo") +
+  scale_color_manual(values = c("Before" = "red", "After" = "green")) +  # Set colour
+  scale_x_discrete(limits = c("Before", "After")) +  # Put Before on the left
+  theme_minimal() + 
+  theme(
+    legend.position = "bottom"  # Place the legend on bottom
+  )
+
+# Compute summary statistics
+summary_stats <- luq_filtered %>%
+  filter(variable %in% selected_variables) %>%
+  group_by(variable, post_hugo) %>%
+  summarise(
+    mean_val = mean(value, na.rm = TRUE),
+    sd_val = sd(value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(names_from = post_hugo, values_from = c(mean_val, sd_val)) %>%
+  mutate(delta = ((mean_val_After - mean_val_Before) / mean_val_Before) * 100)
+
+# summary_stats
+summary_stats
+```
+
+
+### Question three
+Load the **ntl_icecover** data frame (again in `ltersampler`), which describes air temperature and ice cover on two lakes in Madison, Wisconsin, over the 168 years of 1851-2019.
+
+a. As usual, start with some basic exploratory visualisation of the data.  In this case, use an appropriate plot to show the difference in the distributions of _ice_duration_ between the two lakes. Compare the change in ice duration for (i) the two lakes over time, and (ii) the average duration with a linear smoother.  Use the 'patchwork' library to place the plots side-by-side.
+
+b. Often when exploring temporal data we're interested in the difference of each observation from some reference value rather than their absolute values (i.e., the 'anomalies').  Two common ways to express anomalies are: (i) distance from the mean of the entire series, or (ii) the _z_-value, which is $(x_i - mean(x) / sd(x))$ where $x_i$ is each individual value.  The `scale` command in base R calculates the z-scores by centering (subtracting the mean) and scaling (dividing by the SD) or you can do it manually. Remember to deal with the NAs!  Plot the two anomalies over time using the individual lake data and the averaged data. 
+
+c. Identify the top and bottom 10th quantiles (hint: `?quantile`) of the absolute ($x - mean$) anomalies for the individual lake and averaged data and. Plot the anomalies for each year as a column plot (`geom_col`), highlighting the different year types (top 10th, bottom 10th, other) in different colours, with _lakeid_ as a facet.  The easiest way to do this is to use the `mutate(ifelse(...))` syntax.
+
+d. The next step is to repeat the previous steps for the region.  The air temperature data are in the **ntl_airtemp_ dataset** in `lterdatasampler`. Note that there is a single regional climate record so you won't need to worry about calculating site averages. The steps are:
+- filter the data so you have only the months that belong to the winter period (this is months 1-4 and 11-12); `%in%` is useful here
+- make a new data frame with the mean winter air temperature
+- plot the mean winter air temperature over time, with a linear `geom_smoother`
+- calculate the anomalies for the winter air temperature record
+- plot the anomalies as in 3b and then classed into percentiles as in 3c
+
+There should be lots of opportunities for code recycling here!
+
+e. Now you can assess the relationship between the duration of ice cover on the lakes (averaged) and the temperature conditions. The simplest way (of many) to do this is to plot the raw values against each, separating out the lakes (by colour or facet).  First, however, you will need to make a dataset with the duration and the temperature data.  You can do this using a `left_join`, which you may have not encountered yet so I've given the code here. **You'll need to change the data frame names as appropriate from what I have used.**
+
+
+```{r q3e}
+# Run this code but change the data frame names to whatever you have. 
+# I assume as a minimum you have a column called year in both!
+# ntl_temp_duration <- ntl_icecover_ave %>%
+#  left_join(ntl_wintertemp_ave, by = "year")
+```
+
+f. You should have a data frame with three columns: year, mean ice duration, and mean winter temperature. The temperature data don't start until 1869 so we may want to remove years before that as well.  Finally, plot the mean winter temperature against ice duration to assess their correlation, colour the points by the winter air temperature quantile class, and add a label to the plot showing the correlation coefficient.
+
+```{r question 3}
+# a.
+ntl_icecover_avg <- ntl_icecover %>%
+  group_by(lakeid, year) %>%
+  summarise(avg_ice_duration = mean(ice_duration))
+
+# Plot 1: Distribution of ice_duration for two lakes using histograms
+plot1 <- ggplot(ntl_icecover_avg, aes(x = lakeid, y = avg_ice_duration, color = lakeid)) +
+  geom_boxplot() +  # Boxplot for ice duration by lake
+  geom_jitter(width = 0.2, alpha = 0.6) +  # Jittered points to show individual data points
+  labs(title = "Distribution of Average Ice Duration for Two Lakes") +
+  theme_minimal() +
+  scale_color_manual(values = c("red", "green")) +  # Set the border and dot color
+  xlab("Lake ID") + # Label for x-axis
+  ylab("Ice duration (days)")  # Label for y-axis
+
+plot1
+
+# Plot 2: Change in ice_duration over time for two lakes
+plot2 <- ggplot(ntl_icecover, aes(x = year, y = ice_duration, color = lakeid)) +
+  geom_line() +  # Line plot for ice_duration over time
+  labs(title = "Change in Ice Duration Over Time") +
+  theme_minimal() +
+  scale_color_manual(values = c("red", "green"))  # Set custom colors for lakes
+
+# Plot 3: Average
+plot3 <- ggplot(ntl_icecover_avg, aes(x = year, y = avg_ice_duration)) +
+  geom_line(color = "black") +  # Line plot for the average ice duration
+  geom_smooth(method = "lm", se = FALSE, color = "red", linetype = "dashed") +  # Add a straight dashed line (linear model)
+  labs(title = "Change in Average Ice Duration Over Time", 
+       x = "Year", 
+       y = "Ice Duration (days)") +
+  theme_minimal()
+
+plot1 
+plot2 + plot3
+
+# b.
+# Calculate outliers during the ice period
+ntl_icecover <- ntl_icecover %>%
+  group_by(lakeid) %>%
+  mutate(
+    ice_anomaly_abs = ice_duration - mean(ice_duration, na.rm = TRUE),
+    ice_anomaly_z = (ice_duration - mean(ice_duration, na.rm = TRUE)) / sd(ice_duration, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Calculate annual average outliers for all lakes
+ntl_icecover_avg <- ntl_icecover %>%
+  group_by(year) %>%
+  summarise(
+    avg_anomaly_abs = mean(ice_anomaly_abs),
+    avg_anomaly_z = mean(ice_anomaly_z)
+  )
+
+# Figure on the upper left corner: Absolute outliers trends in each lake
+plot4 <- ggplot(ntl_icecover, aes(x = year, y = ice_anomaly_abs, color = lakeid)) +
+  geom_line() +
+  labs(title = "Anomaly (abs)", x = "Year", y = "Anomaly (abs)") +
+  theme_minimal()
+
+# Upper right corner diagram: Average absolute outliers for all lakes
+plot5 <- ggplot(ntl_icecover_avg, aes(x = year, y = avg_anomaly_abs)) +
+  geom_line(color = "black") +
+  labs(x = "Year", y = "Anomaly (abs)") +
+  theme_minimal()
+
+# The bottom left corner is the Z-score outlier of each lake
+plot6 <- ggplot(ntl_icecover, aes(x = year, y = ice_anomaly_z, color = lakeid)) +
+  geom_line() +
+  labs(title = "Anomaly (z)", x = "Year", y = "Anomaly (z)") +
+  theme_minimal()
+
+# Lower right corner diagram: Average Z-score outliers for all lakes
+plot7 <- ggplot(ntl_icecover_avg, aes(x = year, y = avg_anomaly_z)) +
+  geom_line(color = "black") +
+  labs(x = "Year", y = "Anomaly (z)") +
+  theme_minimal()
+
+# Combination 4 pictures
+grid.arrange(plot4, plot5, plot6, plot7)
+
+# c.
+# Calculate anomaly
+ntl_icecover <- ntl_icecover %>%
+  group_by(lakeid) %>%
+  mutate(
+    mean_duration = mean(ice_duration, na.rm = TRUE),
+    ice_anomaly = ice_duration - mean_duration,  # Calculate anomaky
+    top_10 = quantile(ice_anomaly, 0.9, na.rm = TRUE),
+    bottom_10 = quantile(ice_anomaly, 0.1, na.rm = TRUE),
+    duration_class = case_when(
+      ice_anomaly >= top_10 ~ "long",     # long
+      ice_anomaly <= bottom_10 ~ "short", # short
+      TRUE ~ "typical"                    # else
+    )
+  ) %>%
+  ungroup()
+
+# plot
+ggplot(ntl_icecover, aes(x = year, y = ice_anomaly_abs, fill = duration_class)) +
+  geom_col() +
+  scale_fill_manual(values = c("long" = "darkgreen", "short" = "orange", "typical" = "purple")) +
+  labs(x = "Year", y = "Deviation from mean duration (days)", fill = "Duration class") +
+  theme_minimal() +
+  facet_wrap(~lakeid, ncol = 1)  # Divide by lake
+
+# d. 
+# choose the month
+ntl_airtemp <- ntl_airtemp %>%
+  mutate(month = month(sampledate)) # Extract month from date column
+
+# Filter winter data (January-April and November-December)
+winter_airtemp <- ntl_airtemp %>%
+  filter(month %in% c(1, 2, 3, 4, 11, 12))
+
+# Calculate the average winter temperature each year
+winter_summary <- winter_airtemp %>%
+  group_by(year) %>% # The year column is numerical, grouped by year
+  summarize(mean_winter_temp = mean(ave_air_temp_adjusted, na.rm = TRUE))
+
+# Anomaly temperature: average temperature for all years
+mean_temp <- mean(winter_summary$mean_winter_temp, na.rm = TRUE)
+winter_summary <- winter_summary %>%
+  mutate(anomaly = mean_winter_temp - mean_temp)
+
+# Draw Annual average trend of winter temperature
+plot8 <- ggplot(winter_summary, aes(x = year, y = mean_winter_temp)) +
+  geom_line(color = "black") + 
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "red", linetype = "dashed") + 
+  labs(y = "Mean winter air temperature (C)", x = "Year") +
+  theme_minimal()
+
+# polt
+plot9 <- ggplot(winter_summary, aes(x = year, y = anomaly)) +
+  geom_line(color = "black") +  
+  labs(y = "Anomaly", x = "Year") +
+  theme_minimal()
+
+# Calculate anomaly (percentage relative change)
+winter_summary <- winter_summary %>%
+  mutate(anomaly = ( mean_temp - mean_winter_temp) / mean_temp)  # Calculate percentage changes
+
+sd_temp <- sd(winter_summary$mean_winter_temp, na.rm = TRUE)
+
+# Classification
+winter_summary <- winter_summary %>%
+  mutate(category = case_when(
+    mean_winter_temp < mean_temp - sd_temp ~ "Cool",
+    mean_winter_temp > mean_temp + sd_temp ~ "Warm",
+    TRUE ~ "Typical"
+  ))
+
+# plot
+plot10 <- ggplot(winter_summary, aes(x = year, y = anomaly)) +
+  geom_line(color = "black") +  
+  labs(y = "Anomaly", x = "Year") +
+  theme_minimal()
+
+# Draw a bar chart
+plot11 <- ggplot(winter_summary, aes(x = year, y = mean_winter_temp - mean_temp, fill = category)) +
+  geom_col() +  
+  scale_fill_manual(values = c("Cool" = "darkgreen", "Typical" = "orange", "Warm" = "purple")) +  # colour
+  labs(y = "Deviation from Mean Temp (C)", x = "Year", title = "Winter Temperature Deviation") +
+  theme_minimal()
+
+
+# Combine the three diagram
+plot8 / (plot9 + plot10) / plot11
+
+```
+
+```{r, question 3e}
+# e.
+ntl_wintertemp_ave <- ntl_airtemp %>%
+  filter(month %in% c(1, 2, 3, 4, 11, 12)) %>%  # Filter out winter months (1-4, 11-12)
+  group_by(year) %>%
+  summarise(mean_winter_temp = mean(ave_air_temp_adjusted))  # Calculate the average temperature per year
+
+# Process icecover dataset and calculate ice duration
+ntl_icecover <- ntl_icecover %>%
+  mutate(ice_duration = as.numeric(difftime(ice_off, ice_on, units = "days")))  # Calculate the duration of the ice
+
+# Summary of the average ice duration per year
+ntl_icecover_ave <- ntl_icecover %>%
+  group_by(year) %>%
+  summarise(mean_duration = mean(ice_duration))  # Average duration of ice per year
+
+# Connect temperature data to ice duration data
+ntl_temp_duration <- ntl_icecover_ave %>%
+  left_join(ntl_wintertemp_ave, by = "year")  # use year
+
+# Calculate annual temperature abnormalities and classify them by cool, typical, and warm
+ntl_temp_duration <- ntl_temp_duration %>%
+  mutate(anomaly = mean_winter_temp - mean(mean_winter_temp, na.rm = TRUE)) 
+
+ntl_temp_duration <- ntl_temp_duration %>%
+  mutate(temp_category = case_when(
+    anomaly < -1 ~ "cool",         # anomoly less than -1 for cool
+    anomaly >= -1 & anomaly <= 1 ~ "typical",  # between -1 and 1 for typical
+    anomaly > 1 ~ "warm"           # greater than 1 for warm
+  ))
+
+correlation <- cor(ntl_temp_duration$mean_winter_temp, ntl_temp_duration$mean_duration, use = "complete.obs")
+
+# plot
+ggplot(ntl_temp_duration, aes(x = mean_duration, y = mean_winter_temp)) +
+  geom_point(aes(color = temp_category)) +  # colour
+  geom_smooth(method = "lm") +  # Add linear regression line
+  labs(x = "Mean Ice Duration", 
+       y = "Mean Winter Temperature", 
+       title = "Relationship between Temperature and Ice Duration") +
+  annotate("text", x = max(ntl_temp_duration$mean_duration, na.rm = TRUE) * 0.4,  # position
+           y = max(ntl_temp_duration$mean_winter_temp, na.rm = TRUE) * 0,  # position
+           label = paste("Correlation: ", round(correlation, 2)), size = 5, color = "black") +  # Show correlation coefficients
+  theme_minimal() 
+```

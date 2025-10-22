@@ -1,0 +1,85 @@
+
+This little tutorial for calculating KDE.
+
+First we load all necessary packages.
+
+
+Then we load the example dataset and prepare it into expected format of sf data.frame.
+```{r}
+library(SpatialKDE)
+library(sp)
+library(sf)
+library(dplyr)
+library(tmap)
+```
+
+```{r}
+data(meuse)
+?meuse
+meuse <- meuse %>%
+  st_as_sf(coords = c("x", "y"), dim = "XY") %>%
+  st_set_crs(28992) %>%
+  select()
+```
+
+Let’s define variables necessary for KDE estimation, cell size of the resulting grid and band width of points.
+
+
+```{r}
+cell_size <- 100
+band_width <- 150
+```
+
+Vector grid
+Now we can prepare grid for KDE estimation. We prepare rectangular grid (hexagonal is the second option) with given cell size which is slightly bigger than convex hull of the data.
+
+```{r}
+grid_meuse <- meuse %>%
+  create_grid_rectangular(cell_size = cell_size, side_offset = band_width)
+```
+
+
+At this moment it is possible to calculate KDE using kde() function with specified settings.
+```{r}
+
+kde <- meuse %>%
+  kde(band_width = band_width, kernel = "quartic", grid = grid_meuse)
+## Using centroids instead of provided `grid` geometries to calculate KDE estimates.
+
+  
+```
+                                                                            
+The result can be visualized using tmap package.
+
+```{r}
+tm_shape(kde) +
+  tm_polygons(fill = "kde_value", fill.scale = tm_scale("blue"), fill.legend = tm_legend("KDE Estimate"))
+```
+
+
+
+
+Raster
+Now we can prepare raster for KDE estimation. We prepare raster with given cell size which is slightly bigger than convex hull of the data.
+
+```{r}
+raster_meuse <- meuse %>%
+  create_raster(cell_size = cell_size, side_offset = band_width)
+```
+
+
+At this moment it is possible to calculate KDE using kde() function with specified settings.
+
+```{r}
+kde <- meuse %>%
+  kde(band_width = band_width, kernel = "triweight", grid = raster_meuse)
+```
+
+                                                                              
+The result can be visualized using tmap package.
+```{r}
+tm_shape(kde) +
+  tm_raster(col.scale = tm_scale(values = "viridis"), col.legend = tm_legend("KDE Estimate"))
+```
+
+

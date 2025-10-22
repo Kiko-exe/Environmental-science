@@ -1,0 +1,3085 @@
+---
+title: "737_2"
+author: "Yuehan Luo"
+date: "2025-05-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(vegan)
+library(cluster)
+library(pheatmap)
+library(networkD3)
+
+# 1. 读取数据
+species_matrix <- read.csv("~/Downloads/Kiaaraara-ForR.csv", check.names = FALSE)
+rownames(species_matrix) <- make.unique(as.character(species_matrix$site))  # 确保唯一性
+species_matrix <- species_matrix[, -1]  # 移除原来的 site 列
+
+env_data <- read_excel("~/Downloads/Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data")
+pcq_data <- read_excel("~/Downloads/Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+
+species_matrix[is.na(species_matrix)] <- 0
+species_matrix <- species_matrix[rowSums(species_matrix) > 0, ]
+
+# 2. 计算 Bray-Curtis 距离
+bc_dist <- vegdist(species_matrix, method = "bray")
+```
+
+```{r}
+# ==== Bray-Curtis 距离和聚类分析 ====
+bc_dist <- vegdist(species_matrix, method = "bray")
+hc <- hclust(bc_dist, method = "average")
+plot(hc, main = "Cluster Dendrogram of Sites", xlab = "", sub = "", ylab = "Bray-Curtis Distance")
+rect.hclust(hc, k = 4, border = 2:5)
+groups <- cutree(hc, k = 4)
+```
+
+```{r}
+# ==== nMDS 分析 ====
+nmds <- metaMDS(species_matrix, distance = "bray", k = 2, trymax = 100)
+scores_nmds <- as.data.frame(scores(nmds, display = "sites"))
+scores_nmds$group <- as.factor(groups)
+
+ggplot(scores_nmds, aes(x = NMDS1, y = NMDS2, color = group)) +
+  geom_point(size = 3) +
+  stat_ellipse(aes(group = group), type = "norm", linetype = 2) +
+  theme_minimal() +
+  labs(title = "nMDS Ordination of Sites", color = "Group")
+```
+
+```{r}
+# ==== 环境变量拟合并叠加 ====
+# 获取交集样点名
+common_sites <- intersect(rownames(species_matrix), env_data$Station)
+
+# 同步筛选两个数据集
+species_matrix_clean <- species_matrix[common_sites, ]
+env_subset <- env_data %>%
+  filter(Station %in% common_sites) %>%
+  column_to_rownames("Station") %>%
+  select(`Aspect (°)`, `Slope (°)`, `Canopy Hgt (m)`) %>%
+  na.omit()
+
+# 再次同步（因为 na.omit 后行数可能变化）
+common_sites_final <- intersect(rownames(species_matrix_clean), rownames(env_subset))
+species_matrix_clean <- species_matrix_clean[common_sites_final, ]
+env_subset <- env_subset[common_sites_final, ]
+
+# 重新 nMDS 分析
+nmds <- metaMDS(species_matrix_clean, distance = "bray", k = 2, trymax = 100)
+
+# 现在可以安全执行 envfit
+ef <- envfit(nmds, env_subset, perm = 999)
+ef_vectors <- as.data.frame(scores(ef, display = "vectors"))
+
+ggplot(scores_nmds, aes(x = NMDS1, y = NMDS2, color = group)) +
+  geom_point(size = 3) +
+  geom_segment(data = ef_vectors,
+               aes(x = 0, y = 0, xend = NMDS1, yend = NMDS2),
+               arrow = arrow(length = unit(0.25, "cm")), color = "black") +
+  geom_text(data = ef_vectors,
+            aes(x = NMDS1, y = NMDS2, label = rownames(ef_vectors)),
+            color = "black", vjust = -1) +
+  theme_minimal() +
+  labs(title = "nMDS with Environmental Variables")
+```
+
+```{r}
+# ==== 1. 加载原始数据 ====
+df_data <- read.csv("~/Downloads/Kiaaraara-ForR.csv", check.names = FALSE, stringsAsFactors = FALSE)
+df_data$Site <- as.character(df_data[, 1])  # 设置站点标签
+rownames(df_data) <- make.unique(df_data$Site)
+df_data <- df_data[, -1]  # 去掉原始 site 列
+```
+
+```{r}
+# ==== 2. 读取物种功能组分类表 ====
+df_codes <- read_excel("~/Downloads/Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx",
+                       sheet = "Species Names and Lifeform")
+
+df_codes <- df_codes %>%
+  select(Code = `Species Code`,
+         Group = `Fern, Climber, Shrub, Herb, Tree, Grass, Sedge, Forb`) %>%
+  filter(!is.na(Code)) %>%
+  mutate(Code = str_trim(Code),
+         Group = ifelse(is.na(Group) | Group == "", "Other", Group)) %>%
+  mutate(Group = ifelse(Group %in% c("F", "T", "S", "H", "G", "C", "Se"), Group, "Other"))
+```
+
+```{r}
+# ============================================
+# Kaiaraara Forest Composition Analysis - 2025
+# ============================================
+
+# ==== 1. LOAD PACKAGES ====
+
+
+library(vegan)
+library(cluster)
+library(dplyr)
+library(readr)
+
+# ==== 2. READ IN DATA ====
+# Make sure the file path matches your local setup
+data_raw <- read.csv("~/Downloads/Kiaaraara-ForR.csv", stringsAsFactors = FALSE)
+# ==== 2. READ CSV FILE WITHOUT ROW.NAMES ====
+
+# ==== 2. CHECK DUPLICATES IN SITE COLUMN ====
+duplicated_sites <- data_raw$site[duplicated(data_raw$site)]
+print(duplicated_sites)  # 输出重复的名称供你核查
+
+# ==== 3. IF DUPLICATES EXIST, MAKE UNIQUE NAMES ====
+# Append row index to duplicate names to make them unique
+data_raw$site <- make.unique(data_raw$site)
+
+# ==== 4. SET ROWNAMES AND REMOVE 'site' COLUMN ====
+rownames(data_raw) <- data_raw$site
+data_clean <- data_raw[, -which(names(data_raw) == "site")]
+
+# ==== 5. CONVERT TO NUMERIC & REMOVE NA ====
+library(dplyr)
+data_clean <- data_clean %>% mutate_all(as.numeric)
+data_clean <- na.omit(data_clean)
+
+# ==== 6. CONTINUE AS USUAL ====
+library(vegan)
+bc_dist <- vegdist(data_clean, method = "bray")
+
+hc <- hclust(bc_dist, method = "average")
+plot(hc, main = "Hierarchical Clustering of Sites", cex = 0.6)
+
+# Cut dendrogram into k clusters
+k <- 3
+groups <- cutree(hc, k = k)
+group_df <- data.frame(Site = rownames(data_clean), Group = as.factor(groups))
+
+# NMDS
+nmds <- metaMDS(data_clean, distance = "bray", k = 2, trymax = 100)
+ordiplot(nmds, type = "n", main = "nMDS Ordination")
+colors <- rainbow(k)
+for (i in 1:k) {
+  points(nmds$points[group_df$Group == i, ], col = colors[i], pch = 19)
+}
+legend("topright", legend = paste("Group", 1:k), col = colors, pch = 19)
+text(nmds$points, labels = rownames(nmds$points), cex = 0.7)
+```
+
+```{r}
+library(vegan)
+library(ggplot2)
+library(RColorBrewer)
+
+# 假设你已有 nmds, group_df, and data_clean
+site_scores <- as.data.frame(scores(nmds, display = "sites"))
+site_scores$Site <- rownames(site_scores)
+
+# 确保合并群组信息（Site 对应 group_df$Site）
+site_scores <- merge(site_scores, group_df, by.x = "Site", by.y = "Site")
+
+# 设置颜色（不使用 rainbow）
+colors <- brewer.pal(n = 5, name = "Dark2")
+
+# 画图
+ggplot(site_scores, aes(x = NMDS1, y = NMDS2, color = Group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  # stat_ellipse(type = "norm", linetype = 2, size = 0.8) +
+  theme_minimal() +
+  labs(title = "nMDS Ordination by Community Group",
+       subtitle = paste("Stress =", round(nmds$stress, 3))) +
+  scale_color_manual(values = colors) +
+  theme(legend.position = "right")
+```
+
+```{r}
+# 提取 site 前缀，假设 site 命名格式为 'PREFIX-编号'
+scores_df$Group <- sub("-.*", "", scores_df$Site)
+
+ggplot(scores_df, aes(x = NMDS1, y = NMDS2, color = Group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  # stat_ellipse(type = "norm", linetype = 2, size = 1) +
+  theme_minimal() +
+  labs(title = "nMDS Ordination by Site Prefix Group",
+       subtitle = paste("Stress =", round(nmds$stress, 3)),
+       x = "NMDS1", y = "NMDS2") +
+  scale_color_brewer(palette = "Paired") +
+  theme(legend.position = "right")
+
+```
+
+```{r}
+library(readxl)
+
+# 读取 PCQ 和环境数据
+pcq_data <- read_excel("~/Downloads/Kiaaraara-PCQandEnvData.xlsx")
+
+# 查看列名
+colnames(pcq_data)
+```
+
+```{r}
+# 改列名方便处理
+colnames(pcq_data)[colnames(pcq_data) == "Slope (°)"] <- "Slope"
+colnames(pcq_data)[colnames(pcq_data) == "Topo Unit (1-5)"] <- "TopoUnit"
+colnames(pcq_data)[colnames(pcq_data) == "Canopy Hgt (m)"] <- "CanopyHeight"
+
+pcq_data$VegUnit <- with(pcq_data, ifelse(
+  TopoUnit %in% c(1, 2) & CanopyHeight > 18 & Slope > 20, 
+  "Mature Ridge Forest",
+  ifelse(TopoUnit == 5 & CanopyHeight < 15, 
+         "Valley Regrowth Forest",
+         "Intermediate Slope Forest"))
+)
+
+table(pcq_data$VegUnit)
+```
+```{r}
+library(ggplot2)
+
+# 获取坐标 + 合并分组
+site_scores <- as.data.frame(scores(nmds, display = "sites"))
+site_scores$Site <- rownames(site_scores)
+
+# 合并 VegUnit
+site_scores <- left_join(site_scores, pcq_data[, c("Station", "VegUnit")], by = c("Site" = "Station"))
+
+# 画图
+ggplot(site_scores, aes(x = NMDS1, y = NMDS2, color = VegUnit)) +
+  geom_point(size = 3, alpha = 0.85) +
+  # stat_ellipse(aes(group = VegUnit), linetype = 2) +
+  scale_color_brewer(palette = "Set2") +
+  labs(title = "nMDS Ordination by Vegetation Units") +
+  theme_minimal()
+```
+```{r}
+# 加载所需的包
+library(readxl)
+library(dplyr)
+library(tidyr)
+
+# 读取数据
+matrix_data <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = "Site-Spp Matrix")
+species_info <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = "Species Names and Lifeform")
+
+# 整理物种矩阵
+matrix_data <- as.data.frame(matrix_data)
+rownames(matrix_data) <- matrix_data[[1]]
+matrix_data <- matrix_data[,-1]
+matrix_data_t <- as.data.frame(t(matrix_data))
+matrix_data_t$`Species Code` <- rownames(matrix_data_t)
+
+# 整理lifeform数据
+species_lifeform <- species_info %>%
+  select(`Species Code`, `Fern, Climber, Shrub, Herb, Tree, Grass, Sedge, Forb`) %>%
+  rename(Lifeform = `Fern, Climber, Shrub, Herb, Tree, Grass, Sedge, Forb`)
+
+# 合并矩阵与lifeform
+merged_data <- merge(matrix_data_t, species_lifeform, by = "Species Code", all.x = TRUE)
+
+# 把Species Code和Lifeform提取出来，准备long格式转换
+long_data <- merged_data %>%
+  pivot_longer(cols = -c(`Species Code`, Lifeform), names_to = "Site", values_to = "Presence") %>%
+  filter(Presence > 0 & !is.na(Lifeform))  # 保留出现的物种并去除NA lifeform
+
+# 统计每个site每种lifeform的物种数
+summary <- long_data %>%
+  group_by(Site, Lifeform) %>%
+  summarise(Species_Count = n(), .groups = 'drop') %>%
+  pivot_wider(names_from = Lifeform, values_from = Species_Count, values_fill = 0)
+
+# 查看结果
+print(summary)
+
+# 如果想写入csv
+# write.csv(summary, "Lifeform_Counts_by_Site.csv", row.names = FALSE)
+```
+
+```{r}
+# 载入必要的包
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# 读取物种矩阵与Lifeform数据
+spp_matrix <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = "Site-Spp Matrix")
+lifeform_info <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = "Species Names and Lifeform")
+
+# 整理数据
+rownames(spp_matrix) <- spp_matrix[[1]]
+spp_matrix <- spp_matrix[,-1]
+spp_matrix_t <- as.data.frame(t(spp_matrix))
+spp_matrix_t$SpeciesCode <- rownames(spp_matrix_t)
+
+# 合并Lifeform信息
+colnames(lifeform_info)[which(names(lifeform_info) == "Fern, Climber, Shrub, Herb, Tree, Grass, Sedge, Forb")] <- "Lifeform"
+merged <- merge(spp_matrix_t, lifeform_info[, c("Species Code", "Lifeform")],
+                by.x = "SpeciesCode", by.y = "Species Code", all.x = TRUE)
+
+# 转换为长格式并保留 presence > 0
+long_df <- merged %>%
+  pivot_longer(cols = -c(SpeciesCode, Lifeform), names_to = "Site", values_to = "Presence") %>%
+  filter(Presence > 0 & !is.na(Lifeform))
+
+# 按Site和Lifeform统计物种数
+summary_df <- long_df %>%
+  group_by(Site, Lifeform) %>%
+  summarise(SpeciesCount = n(), .groups = "drop")
+
+# 保留 site 原始顺序
+summary_df$Site <- factor(summary_df$Site, levels = unique(summary_df$Site))
+
+# 作图：堆叠柱状图
+ggplot(summary_df, aes(x = Site, y = SpeciesCount, fill = Lifeform)) +
+  geom_bar(stat = "identity") +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Figure 1: Lifeform Composition Across Sites",
+    x = "Site", y = "Number of Species",
+    fill = "Lifeform"
+  ) +
+  scale_fill_brewer(palette = "Set3") +  # 柔和12色
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    legend.position = "bottom",
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+```
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+
+# 假设你已有 summary 表格（每个 site 各类 Lifeform 的物种数）
+
+# Step 1: 转为 long 格式
+summary_long <- summary %>%
+  pivot_longer(cols = -Site, names_to = "Lifeform", values_to = "Species_Count")
+
+# Step 2: 保留 Site 的原始顺序
+summary_long$Site <- factor(summary_long$Site, levels = unique(summary$Site))
+
+# Step 3: 自动分色绘图
+
+ggplot(summary_long, aes(x = Site, y = Species_Count, fill = Lifeform)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Set3") +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Lifeform Composition Across Sites",
+    x = "Site", y = "Number of Species", fill = "Lifeform"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 8),  # ← 更小字体
+    legend.position = "bottom"
+  )
+
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# 使用你已有的 summary 表：每个 site 每种 lifeform 的物种数
+
+# 转为long格式
+summary_long <- summary %>%
+  pivot_longer(cols = -Site, names_to = "Lifeform", values_to = "Species_Count")
+
+# 保留 Site 顺序
+summary_long$Site <- factor(summary_long$Site, levels = unique(summary$Site))
+
+# 绘制热图
+ggplot(summary_long, aes(x = Lifeform, y = Site, fill = Species_Count)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "#f0f0f0", high = "#2166ac") +
+  theme_minimal(base_size = 12) +
+  labs(title = "Figure 4: Heatmap of Lifeform Richness per Site",
+       x = "Lifeform", y = "Site", fill = "Species Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(summary_long, aes(x = Lifeform, y = Site, fill = Species_Count)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "#f0f0f0", high = "#2166ac") +
+  theme_minimal(base_size = 12) +
+  labs(
+    title = "Heatmap of Lifeform Richness per Site",
+    x = "Lifeform", y = "Site", fill = "Species Count"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 4)
+  )
+
+```
+
+```{r}
+# 示例：只对 Tree 类做箱线图
+tree_df <- summary_long %>% filter(Lifeform == "T")
+
+ggplot(tree_df, aes(x = Site, y = Species_Count)) +
+  geom_bar(stat = "identity", fill = "#66c2a5") +
+  theme_minimal() +
+  labs(title = "Barplot of Tree Species Richness per Site",
+       x = "Site", y = "Number of Tree Species") +
+  theme(axis.text.x = element_text(angle = 90, size = 8, hjust = 1))
+```
+
+```{r}
+library(readxl)
+library(dplyr)
+
+# 1. 读取数据
+pcq_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+
+# 2. 清理列名（防止空格问题）
+names(pcq_data) <- trimws(names(pcq_data))
+
+# 3. 过滤有效数据（Distance 和 Total DBH）
+pcq_clean <- pcq_data %>%
+  filter(!is.na(`Distance (m)`), !is.na(`Total_Diameter_cm`))  # ← 你自己的列名
+
+# 4. 计算每个记录的 Basal Area（单位 m²）
+pcq_clean <- pcq_clean %>%
+  mutate(
+    BA_m2 = pi * (`Total_Diameter_cm` / 2)^2 / 10000
+  )
+
+# 5. 每个样点汇总：平均距离 + 总 BA
+pcq_summary <- pcq_clean %>%
+  group_by(Station) %>%
+  summarise(
+    mean_distance = mean(`Distance (m)`),
+    total_BA_m2 = sum(BA_m2)
+  ) %>%
+  mutate(
+    Density_stems_ha = (1 / (mean_distance^2)) * (10000 / pi),
+    Basal_Area_ha = total_BA_m2 * (Density_stems_ha / n())  # 平均摊入单位面积
+  )
+
+# 查看结果
+print(pcq_summary)
+```
+
+
+
+```{r}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+
+# 读取 PCQ 数据
+pcq_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+
+# 清理列名（防止空格错误）
+names(pcq_data) <- trimws(names(pcq_data))
+
+# 统计出现频率最高的物种（去除 NA）
+species_counts <- pcq_data %>%
+  filter(!is.na(Species)) %>%
+  count(Species, sort = TRUE)
+
+# 取前10名
+top_species <- species_counts %>% slice_max(n, n = 30)
+
+# 画图
+ggplot(top_species, aes(x = reorder(Species, n), y = n)) +
+  geom_bar(stat = "identity", fill = "darkolivegreen3") +
+  coord_flip() +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Most Common Tree Species Across All Sites",
+    x = "Species", y = "Number of Occurrences"
+  )
+```
+
+```{r}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# 读取数据
+pcq_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+names(pcq_data) <- trimws(names(pcq_data))  # 清理列名空格
+
+# 过滤缺失值（排除没有替代信息的记录）
+repl_data <- pcq_data %>%
+  filter(!is.na(Species), !is.na(`Repl Spp`))
+
+# 统计当前物种被替代的频次
+species_freq <- repl_data %>%
+  count(Species, name = "Current_Count")
+
+# 统计谁是最常出现的替代者
+repl_freq <- repl_data %>%
+  count(`Repl Spp`, name = "Replacement_Count")
+
+# 合并为一个表（左连接两个频率表）
+combined_freq <- full_join(species_freq, repl_freq, by = c("Species" = "Repl Spp")) %>%
+  rename(Replacement_Species = Species)
+
+# 替 NA 为 0，方便画图
+combined_freq[is.na(combined_freq)] <- 0
+
+# 转换为长格式，用于并列条形图
+combined_long <- combined_freq %>%
+  pivot_longer(cols = c(Current_Count, Replacement_Count),
+               names_to = "Type", values_to = "Count")
+
+# 保留频率前10的替代物种
+top_replacements <- combined_long %>%
+  group_by(Replacement_Species) %>%
+  summarise(total = sum(Count)) %>%
+  slice_max(total, n = 10) %>%
+  pull(Replacement_Species)
+
+filtered_data <- combined_long %>%
+  filter(Replacement_Species %in% top_replacements)
+
+# 画图
+ggplot(filtered_data, aes(x = reorder(Replacement_Species, Count), y = Count, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  scale_fill_manual(values = c("Current_Count" = "darkolivegreen3", "Replacement_Count" = "#fc8d62"),
+                    labels = c("Currently Present", "Replacement Species")) +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Replacement Species vs Current Dominant Species",
+    x = "Species", y = "Frequency", fill = ""
+  )
+```
+
+
+```{r}
+
+# Culstering
+
+# 加载包
+library(vegan)
+library(dendextend)
+
+# === Step 1: 读取原始数据并处理 ===
+species_raw <- read.csv("Kiaaraara-ForR.csv", stringsAsFactors = FALSE)
+site_names <- species_raw[, 1]              # 第一列是站点名
+species <- species_raw[, -1]                # 其余是物种数据
+species[is.na(species)] <- 0                # NA 替换为 0
+valid_rows <- rowSums(species) > 0
+species <- species[valid_rows, ]
+site_names <- site_names[valid_rows]
+
+# === Step 2: 计算 Bray-Curtis 距离（未变换）并聚类 ===
+dist_bc <- vegdist(species, method = "bray")
+clust <- hclust(dist_bc, method = "average")  # PaST 默认：UPGMA
+
+# === Step 3: 自动分组（可改 k 值） ===
+k <- 7
+groups <- cutree(clust, k = k)
+
+# === Step 4: 制作带颜色的树状图 ===
+my_colors <- c("grey", "forestgreen", "purple", "tomato","darkblue","orange", "steelblue")  # 你可以自定义顺序和颜色
+dend <- as.dendrogram(clust)
+labels(dend) <- site_names[order.dendrogram(dend)]
+dend <- color_branches(dend, k = k, col = my_colors)
+
+
+# 缩小文字，标准 y 轴，添加标题
+par(cex = 0.6)  # 控制标签文字大小
+plot(dend,
+     main = paste("Site Dendrogram (Bray-Curtis, k =", k, ")"),
+     xlab = "Site",
+     ylab = "Similarity",
+     ylim = c(0, 1))  # Y轴标准化
+```
+
+```{r}
+# 加载必要包
+library(vegan)
+library(ggplot2)
+library(dendextend)
+
+# === 1. 读取原始数据 ===
+species_raw <- read.csv("Kiaaraara-ForR.csv", stringsAsFactors = FALSE)
+site_names <- species_raw[, 1]
+species <- species_raw[, -1]
+species[is.na(species)] <- 0
+valid_rows <- rowSums(species) > 0
+species <- species[valid_rows, ]
+site_names <- site_names[valid_rows]
+
+# === 2. 计算 Bray-Curtis 距离 + UPGMA 聚类 ===
+dist_bc <- vegdist(species, method = "bray")
+clust <- hclust(dist_bc, method = "average")
+
+# === 3. 分组（k = 7）
+k <- 7
+groups <- cutree(clust, k = k)
+
+# === 4. 执行 nMDS 排序 ===
+nmds <- metaMDS(dist_bc, k = 2, trymax = 100)
+
+# === 5. 整理数据框用于绘图
+nmds_points <- as.data.frame(scores(nmds))
+nmds_points$Site <- site_names
+nmds_points$Cluster <- as.factor(groups)
+
+# === 6. 绘制 nMDS 图
+ggplot(nmds_points, aes(x = NMDS1, y = NMDS2, color = Cluster, label = Site)) +
+  geom_point(size = 4) +
+  geom_text(size = 2.5, vjust = -0.7) +
+  labs(title = "nMDS Ordination of Sites (Bray-Curtis, k = 7)",
+       x = "NMDS1",
+       y = "NMDS2") +
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+
+```{r}
+library(dplyr)
+
+# 计算 convex hull
+hull_points <- nmds_points %>%
+  group_by(Cluster) %>%
+  slice(chull(NMDS1, NMDS2))  # 选出每组的凸包边界点
+
+# 绘图：点 + 标签 + 凸包
+ggplot(nmds_points, aes(x = NMDS1, y = NMDS2, color = Cluster)) +
+  geom_polygon(data = hull_points, aes(group = Cluster, fill = Cluster),
+               alpha = 0.2, color = NA) +  # 半透明凸包填色
+  geom_point(size = 4) +
+  geom_text(aes(label = Site), size = 2.5, vjust = -0.7) +
+  labs(title = "nMDS Ordination (Bray-Curtis, k = 7)",
+       x = "NMDS1", y = "NMDS2") +
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+```{r}
+# 指定颜色向量（6个群落/Cluster）
+my_colors <- c("tomato", "orange", "forestgreen", "steelblue", "purple", "grey", "darkblue")
+
+# 确保 Cluster 是 factor，并匹配颜色
+nmds_points$Cluster <- factor(nmds_points$Cluster, levels = unique(nmds_points$Cluster))
+
+# 重新计算 convex hull
+library(dplyr)
+hull_points <- nmds_points %>%
+  group_by(Cluster) %>%
+  slice(chull(NMDS1, NMDS2))
+
+stress_value <- round(nmds_result$stress, 3)  # 保留三位小数
+
+# 绘图：nMDS点 + 标签 + 背景凸包（使用指定颜色）
+library(ggplot2)
+ggplot(nmds_points, aes(x = NMDS1, y = NMDS2, color = Cluster)) +
+  geom_polygon(data = hull_points, aes(group = Cluster, fill = Cluster),
+               alpha = 0.2, color = NA) +
+  geom_point(size = 4) +
+  geom_text(aes(label = Site), size = 2.5, vjust = -0.7) +
+  labs(title = "nMDS Ordination (Bray-Curtis, k = 7)",
+       x = "NMDS1", y = "NMDS2") +
+  scale_color_manual(values = my_colors) +
+  scale_fill_manual(values = my_colors) +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+ggplot(nmds_points, aes(x = NMDS1, y = NMDS2, color = Cluster)) +
+  geom_polygon(data = hull_points, aes(group = Cluster, fill = Cluster),
+               alpha = 0.2, color = NA) +
+  geom_point(size = 4) +
+  geom_text(aes(label = Site), size = 2.5, vjust = -0.7) +
+  labs(title = "nMDS Ordination (Bray-Curtis, k = 7)",
+       x = "NMDS1", y = "NMDS2") +
+  scale_color_manual(values = my_colors) +
+  scale_fill_manual(values = my_colors) +
+  theme_minimal() +
+  theme(legend.position = "right") +
+  annotate("text", x = Inf, y = -Inf, label = paste0("Stress = ", stress_value),
+           hjust = 1.1, vjust = -1.2, size = 4, fontface = "italic")
+
+```
+
+
+```{r}
+# === Step 5: 导出分组结果为 CSV 文件 ===
+
+cluster_df <- data.frame(Site = site_names, Cluster = groups)
+write.csv(cluster_df, "Kaiaraara_ClusterAssignments_k7_rawBray_UPGMA.csv", row.names = FALSE)
+```
+
+```{r}
+# 加载包
+library(readxl)
+library(dplyr)
+
+# 读取 PCQ 明细数据
+pcq <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+
+# 选择需要的字段并去除缺失值
+pcq_clean <- pcq %>%
+  select(Station, Quarter, `Distance (m)`, Total_Diameter_cm) %>%
+  rename(Distance = `Distance (m)`, DBH = Total_Diameter_cm) %>%
+  filter(!is.na(Distance), !is.na(DBH))
+
+# 定义每个站点的结构指标计算函数
+calculate_metrics <- function(df) {
+  mean_r <- mean(df$Distance)
+  density <- 10000 / (mean_r ^ 2)  # PCQ 密度估算
+  
+  # 单棵树的基面积 BA = π × (DBH/2)^2, 单位转为米
+  ba_per_tree <- pi * (df$DBH / 200)^2  # DBH 单位 cm → m
+  total_ba <- sum(ba_per_tree) * 2500   # 每棵树代表 1/2500 ha
+  
+  avg_dbh <- mean(df$DBH)
+  
+  return(data.frame(
+    Density_trees_ha = round(density, 1),
+    Basal_Area_m2_ha = round(total_ba, 2),
+    Mean_DBH_cm = round(avg_dbh, 1)
+  ))
+}
+
+# 应用于每个 Station
+structure_by_station <- pcq_clean %>%
+  group_by(Station) %>%
+  do(calculate_metrics(.)) %>%
+  ungroup()
+
+# 查看结果
+print(structure_by_station)
+```
+
+
+```{r}
+# 加载必要包
+library(readxl)
+library(dplyr)
+library(ggplot2)
+
+# === 1. 读取数据 ===
+pcq_tree <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster, `Slope (°)`, `Canopy Hgt (m)`, `Topo Unit (1-5)`) %>%
+  filter(!is.na(Cluster)) %>%
+  mutate(Cluster = as.factor(Cluster))
+
+# === 2. 清洗 PCQ 树木结构数据 ===
+pcq_clean <- pcq_tree %>%
+  select(Station, Quarter, `Distance (m)`, Total_Diameter_cm) %>%
+  rename(Distance = `Distance (m)`, DBH = Total_Diameter_cm) %>%
+  filter(!is.na(Distance), !is.na(DBH))
+
+# === 3. 计算每个站点的结构指标 ===
+calculate_metrics <- function(df) {
+  mean_r <- mean(df$Distance)
+  density <- 10000 / (mean_r ^ 2)
+  ba_per_tree <- pi * (df$DBH / 200)^2
+  total_ba <- sum(ba_per_tree) * 2500
+  avg_dbh <- mean(df$DBH)
+  
+  return(data.frame(
+    Density_trees_ha = round(density, 1),
+    Basal_Area_m2 = round(ba_per_tree, 1),
+    Basal_Area_m2_ha = round(total_ba, 2),
+    Mean_DBH_cm = round(avg_dbh, 1)
+  ))
+}
+
+structure_by_station <- pcq_clean %>%
+  group_by(Station) %>%
+  do(calculate_metrics(.)) %>%
+  ungroup()
+
+# === 4. 合并 Cluster 和环境变量 ===
+env_data <- env_data %>%
+  rename(Slope = `Slope (°)`, CanopyHgt = `Canopy Hgt (m)`, TopoUnit = `Topo Unit (1-5)`)
+
+all_data <- structure_by_station %>%
+  left_join(env_data, by = "Station") %>%
+  filter(!is.na(Cluster))
+
+# === 5. 汇总每个 Cluster 的结构 + 环境变量 ===
+summary_by_cluster <- all_data %>%
+  group_by(Cluster) %>%
+  summarise(
+    n = n(),
+    Density_mean = round(mean(Density_trees_ha), 1),
+    Density_sd   = round(sd(Density_trees_ha), 1),
+    BA_mean      = round(mean(Basal_Area_m2), 2),
+    BA_sd        = round(sd(Basal_Area_m2), 2),
+    BA_mean_perha      = round(mean(Basal_Area_m2_ha), 2),
+    BA_sd_perha        = round(sd(Basal_Area_m2_ha), 2),
+    DBH_mean_perha     = round(mean(Mean_DBH_cm), 1),
+    DBH_sd_perha       = round(sd(Mean_DBH_cm), 1),
+    Slope_mean   = round(mean(Slope, na.rm = TRUE), 1),
+    Slope_sd     = round(sd(Slope, na.rm = TRUE), 1),
+    CanopyHgt_mean = round(mean(CanopyHgt, na.rm = TRUE), 1),
+    CanopyHgt_sd   = round(sd(CanopyHgt, na.rm = TRUE), 1),
+    TopoUnit_median = median(TopoUnit, na.rm = TRUE)
+  )
+
+print(summary_by_cluster)
+
+
+# === 6. 可视化：结构变量 ===
+ggplot(all_data, aes(x = Cluster, y = Density_trees_ha, fill = Cluster)) +
+  geom_boxplot() +
+  labs(title = "Density (trees/ha) by Cluster", y = "Density (trees/ha)", x = "Cluster") +
+  theme_minimal()
+
+ggplot(all_data, aes(x = Cluster, y = Basal_Area_m2_ha, fill = Cluster)) +
+  geom_boxplot() +
+  labs(title = "Basal Area (m²/ha) by Cluster", y = "Basal Area (m²/ha)", x = "Cluster") +
+  theme_minimal()
+
+# === 7. 可视化：环境变量 ===
+ggplot(all_data, aes(x = Cluster, y = Slope, fill = Cluster)) +
+  geom_boxplot() +
+  labs(title = "Slope (°) by Cluster", y = "Slope (°)", x = "Cluster") +
+  theme_minimal()
+
+ggplot(all_data, aes(x = Cluster, y = CanopyHgt, fill = Cluster)) +
+  geom_boxplot() +
+  labs(title = "Canopy Height (m) by Cluster", y = "Canopy Height (m)", x = "Cluster") +
+  theme_minimal()
+
+ggplot(structure_full %>% filter(!is.na(Cluster)),  # 去除 Cluster 为 NA 的记录
+       aes(x = Cluster, y = Mean_DBH_cm, fill = Cluster)) +
+  geom_boxplot(outlier.shape = NA) +
+  labs(title = "DBH (cm) by Cluster",
+       y = "DBH (cm)", x = "Cluster") +
+  theme_minimal() 
+
+```
+```{r}
+# === 0. 加载包 ===
+library(readxl)
+library(dplyr)
+library(ggplot2)
+
+# === 1. 读取数据 ===
+pcq_tree <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster, `Slope (°)`, `Canopy Hgt (m)`, `Topo Unit (1-5)`) %>%
+  rename(
+    Slope = `Slope (°)`,
+    CanopyHgt = `Canopy Hgt (m)`,
+    TopoUnit = `Topo Unit (1-5)`
+  ) %>%
+  mutate(Cluster = as.factor(Cluster))
+
+# === 2. 提取并处理 PCQ 数据 ===
+pcq_raw <- pcq_tree %>%
+  select(Station, Quarter, `Distance (m)`, Total_Diameter_cm) %>%
+  rename(Distance = `Distance (m)`, DBH = Total_Diameter_cm)
+
+# === 3. 结构指标计算函数（允许 NA）===
+calculate_metrics <- function(df) {
+  mean_r <- mean(df$Distance, na.rm = TRUE)
+  density <- 10000 / (mean_r ^ 2)
+  
+  ba_per_tree <- pi * (df$DBH / 200)^2
+  ba_total <- sum(ba_per_tree, na.rm = TRUE) * 2500
+  
+  avg_dbh <- mean(df$DBH, na.rm = TRUE)
+  
+  return(data.frame(
+    Density_trees_ha = round(density, 1),
+    Basal_Area_m2_ha = round(ba_total, 2),
+    Mean_DBH_cm = round(avg_dbh, 1)
+  ))
+}
+
+# === 4. 计算每个站点的结构指标 ===
+structure_by_station <- pcq_raw %>%
+  group_by(Station) %>%
+  do(calculate_metrics(.)) %>%
+  ungroup()
+
+# === 5. 找出缺失结构数据的站点（如没有 Distance/DBH） ===
+all_stations <- unique(env_data$Station)
+missing_stations <- setdiff(all_stations, structure_by_station$Station)
+
+structure_missing <- data.frame(
+  Station = missing_stations,
+  Density_trees_ha = NA,
+  Basal_Area_m2_ha = NA,
+  Mean_DBH_cm = NA
+)
+
+# === 6. 合并结构数据并加上 Cluster、环境变量 ===
+structure_full <- bind_rows(structure_by_station, structure_missing) %>%
+  left_join(env_data, by = "Station") %>%
+  arrange(Station)
+
+# === 7. 输出：每组的结构均值 ± SD ===
+summary_by_cluster <- structure_full %>%
+  filter(!is.na(Cluster)) %>%
+  group_by(Cluster) %>%
+  summarise(
+    n = n(),
+    Density_mean = round(mean(Density_trees_ha, na.rm = TRUE), 1),
+    Density_sd   = round(sd(Density_trees_ha, na.rm = TRUE), 1),
+    BA_mean = round(mean(Basal_Area_m2_ha, na.rm = TRUE), 2),
+    BA_sd   = round(sd(Basal_Area_m2_ha, na.rm = TRUE), 2),
+    DBH_mean = round(mean(Mean_DBH_cm, na.rm = TRUE), 1),
+    DBH_sd   = round(sd(Mean_DBH_cm, na.rm = TRUE), 1),
+    Slope_mean   = round(mean(Slope, na.rm = TRUE), 1),
+    Slope_sd     = round(sd(Slope, na.rm = TRUE), 1),
+    CanopyHgt_mean = round(mean(CanopyHgt, na.rm = TRUE), 1),
+    CanopyHgt_sd   = round(sd(CanopyHgt, na.rm = TRUE), 1),
+    TopoUnit_median = median(TopoUnit, na.rm = TRUE)
+  )
+
+print(summary_by_cluster)
+write.csv(summary_by_cluster, "StandStructure_with_Canopy_NAkept.csv", row.names = FALSE)
+# === 8. 可视化结构指标（可选）===
+ggplot(structure_full, aes(x = Cluster, y = Density_trees_ha, fill = Cluster)) +
+  geom_boxplot() +
+  labs(title = "Tree Density (trees/ha) by Cluster", y = "Density (trees/ha)", x = "Cluster") +
+  theme_minimal()
+
+ggplot(structure_full, aes(x = Cluster, y = Basal_Area_m2_ha, fill = Cluster)) +
+  geom_boxplot() +
+  labs(title = "Basal Area (m²/ha) by Cluster", y = "Basal Area (m²/ha)", x = "Cluster") +
+  theme_minimal()
+
+ggplot(structure_full, aes(x = Cluster, y = Mean_DBH_cm, fill = Cluster)) +
+  geom_boxplot() +
+  labs(title = "Mean DBH (cm) by Cluster", y = "Mean DBH (cm)", x = "Cluster") +
+  theme_minimal()
+
+# === 6. 可视化：结构变量 ===
+ggplot(all_data, aes(x = Cluster, y = Density_trees_ha, fill = Cluster)) +
+  geom_boxplot() +
+  labs(title = "Density (trees/ha) by Cluster", y = "Density (trees/ha)", x = "Cluster") +
+  theme_minimal()
+
+ggplot(all_data, aes(x = Cluster, y = Basal_Area_m2_ha, fill = Cluster)) +
+  geom_boxplot() +
+  labs(title = "Basal Area (m²/ha) by Cluster", y = "Basal Area (m²/ha)", x = "Cluster") +
+  theme_minimal()
+
+# === 7. 可视化：环境变量 ===
+ggplot(all_data, aes(x = Cluster, y = Slope, fill = Cluster)) +
+  geom_boxplot() +
+  labs(title = "Slope (°) by Cluster", y = "Slope (°)", x = "Cluster") +
+  theme_minimal()
+
+ggplot(all_data, aes(x = Cluster, y = CanopyHgt, fill = Cluster)) +
+  geom_boxplot() +
+  labs(title = "Canopy Height (m) by Cluster", y = "Canopy Height (m)", x = "Cluster") +
+  theme_minimal()
+
+ggplot(all_data, aes(x = Cluster, y = TopoUnit, fill = Cluster)) +
+  geom_boxplot() +
+  labs(title = "Topo Unit (1-5) by Cluster", y = "Topo Unit", x = "Cluster") +
+  theme_minimal()
+```
+
+```{r}
+# === 加载必要包 ===
+library(readxl)
+library(dplyr)
+
+# === 1. 读取数据 ===
+pcq_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster) %>%
+  filter(!is.na(Cluster))
+
+# === 2. 合并 Cluster，并过滤 NA（确保没有 NA）===
+pcq <- pcq_data %>%
+  select(Station, Species, Total_Diameter_cm) %>%
+  rename(DBH_cm = Total_Diameter_cm) %>%
+  inner_join(env_data, by = "Station") %>%                  # inner_join 保证 Cluster 不为 NA
+  filter(!is.na(Species), !is.na(DBH_cm))                   # 丢弃 NA 的树
+
+# === 3. 计算每棵树的 BA（单位 m²） ===
+pcq <- pcq %>%
+  mutate(BA_tree = pi * (DBH_cm / 200)^2)
+
+# === 4. 每个 Cluster 的总 BA 和总树数 ===
+cluster_total <- pcq %>%
+  group_by(Cluster) %>%
+  summarise(Total_BA_Cluster = sum(BA_tree),
+            Total_Trees = n(),
+            Total_Stations = n_distinct(Station),
+            .groups = "drop")
+
+# === 5. 每个物种在每个 Cluster 的总 BA、数量、频率 ===
+iv_table <- pcq %>%
+  group_by(Cluster, Species) %>%
+  summarise(BA_sum = round(sum(BA_tree),2),
+            Tree_count = n(),
+            Stations_with_species = n_distinct(Station),
+            .groups = "drop") %>%
+  left_join(cluster_total, by = "Cluster") %>%
+  mutate(
+    Rel_Density = round(100 * Tree_count / Total_Trees, 1),
+    Rel_BA = round(100 * BA_sum / Total_BA_Cluster, 1),
+    Rel_Freq = round(100 * Stations_with_species / Total_Stations, 1),
+    IV = Rel_Density + Rel_BA + Rel_Freq
+  ) %>%
+  select(Cluster, Species, Tree_count, BA_sum,
+         Rel_Density, Rel_BA, Rel_Freq, IV) %>%
+  arrange(Cluster, desc(IV))
+
+# === 6. 输出结果 ===
+print(iv_table)
+write.csv(iv_table, "IV_by_cluster.csv", row.names = FALSE)
+```
+
+```{r}
+library(ggplot2)
+
+# 假设 iv_table 已包含所有数据
+top_species_plot <- iv_table %>%
+  group_by(Cluster) %>%
+  slice_max(order_by = IV, n = 5)  # 每组选出 IV 前 5 高的物种
+
+ggplot(top_species_plot, aes(x = reorder(Species, -IV), y = IV, fill = Cluster)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~Cluster, scales = "free_x") +
+  coord_flip() +
+  labs(title = "Top 5 Species by Importance Value per Cluster",
+       x = "Species", y = "Importance Value (IV)") +
+  theme_minimal()
+```
+
+```{r}
+# === 加载必要包 ===
+library(ggplot2)
+library(dplyr)
+
+# === 假设你已经有 iv_table 数据框 ===
+# 如果你已保存为 CSV，可以读取它：
+# iv_table <- read.csv("IV_by_cluster.csv")
+
+# === 设置阈值，只保留 IV > 15 的物种 ===
+iv_threshold <- 15
+
+iv_filtered <- iv_table %>%
+  filter(IV > iv_threshold)
+
+# === 可视化：每个 Cluster 的主导物种（IV > 15） ===
+ggplot(iv_filtered, aes(x = reorder(Species, IV), y = IV, fill = as.factor(Cluster))) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~Cluster, scales = "free", ncol = 2) +
+  coord_flip() +
+  labs(
+    title = paste("Dominant Species per Cluster (IV >", iv_threshold, ")"),
+    x = "Species", y = "Importance Value (IV)",
+    fill = "Cluster"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.y = element_text(size = 8),
+    strip.text = element_text(size = 10),
+    legend.position = "none"
+  )
+```
+
+```{r}
+# === 加载包 ===
+library(dplyr)
+library(ggplot2)
+
+# === 确保 iv_table 数据存在（或从CSV读取）===
+# iv_table <- read.csv("IV_by_cluster.csv")
+
+# === 绘图 ===
+p <- ggplot(iv_table, aes(x = reorder(Species, IV), y = IV, fill = as.factor(Cluster))) +
+  geom_bar(stat = "identity", color = "black") +   # 加黑色边框
+  facet_wrap(~Cluster, scales = "free_x", ncol = 2) +
+  coord_flip() +
+  labs(
+    title = "Species Importance Values by Cluster (All Species)",
+    x = "Species", y = "Importance Value (IV)",
+    fill = "Cluster"
+  ) +
+  theme_bw(base_size = 13) +  # 白底黑字
+  theme(
+    axis.text.y = element_text(size = 7, color = "black"),
+    axis.text.x = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    strip.text = element_text(size = 11, face = "bold", color = "black"),
+    panel.grid.major = element_line(color = "grey85"),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  )
+
+# === 显示图 ===
+print(p)
+
+# === 保存为高清图 ===
+ggsave("Cluster_IV_AllSpecies_cleanwhite.png",
+       plot = p,
+       width = 14, height = 20, units = "in", dpi = 300)
+
+```
+
+```{r}
+# === 加载包 ===
+library(dplyr)
+library(ggplot2)
+
+# === 自定义颜色向量，确保顺序和 Cluster 一致 ===
+my_colors <- c("tomato", "orange", "forestgreen", "steelblue", "purple", "grey", "darkblue")
+
+# 确保 Cluster 是 factor，并按出现顺序排序
+iv_table$Cluster <- factor(iv_table$Cluster, levels = unique(iv_table$Cluster))
+
+# === 绘图 ===
+p <- ggplot(iv_table, aes(x = reorder(Species, IV), y = IV, fill = Cluster)) +
+  geom_bar(stat = "identity", color = "black") +  # 黑色边框
+  facet_wrap(~Cluster, scales = "free_x", ncol = 2) +
+  coord_flip() +
+  labs(
+    title = "Species Importance Values by Cluster (All Species)",
+    x = "Species", y = "Importance Value (IV)",
+    fill = "Cluster"
+  ) +
+  scale_fill_manual(values = my_colors) +  # 应用自定义颜色
+  theme_bw(base_size = 13) +  # 白底黑字
+  theme(
+    axis.text.y = element_text(size = 7, color = "black"),
+    axis.text.x = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    strip.text = element_text(size = 11, face = "bold", color = "black"),
+    panel.grid.major = element_line(color = "grey85"),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  )
+
+# === 显示图 ===
+print(p)
+
+# === 保存高清图 ===
+ggsave("Cluster_IV_AllSpecies_cleanwhite_colored.png",
+       plot = p,
+       width = 14, height = 20, units = "in", dpi = 300)
+```
+
+
+```{r}
+library(readxl)
+library(dplyr)
+library(tidyr)
+
+# === 读取 species-by-site 数据 ===
+species_matrix <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = 1)
+
+# 将宽格式转换为长格式（Presence 表示在该 Station 是否出现）
+species_long <- species_matrix %>%
+  rename(Station = 1) %>%
+  pivot_longer(-Station, names_to = "SpeciesCode", values_to = "Presence") %>%
+  filter(Presence > 0)
+
+# === 读取 species list 和 Growth Form 分类 ===
+species_list <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = 2)
+
+# 提取 Species Code 和 Growth_Form 列（列名太长，用反引号括起来）
+species_list_clean <- species_list %>%
+  select(`Species Code`, `Fern, Climber, Shrub, Herb, Tree, Grass, Sedge, Forb`) %>%
+  rename(Growth_Form = `Fern, Climber, Shrub, Herb, Tree, Grass, Sedge, Forb`) %>%
+  filter(!is.na(Growth_Form))
+
+# === 合并 Growth Form 到长格式表中 ===
+species_merged <- species_long %>%
+  left_join(species_list_clean, by = c("SpeciesCode" = "Species Code"))
+
+# === 检查合并结果 ===
+species_merged
+```
+
+```{r}
+# 每个 growth form 有多少个物种？
+growthform_species_count <- species_merged %>%
+  distinct(SpeciesCode, Growth_Form) %>%
+  count(Growth_Form) %>%
+  arrange(desc(n))
+
+# 每类 growth form 出现了多少次（总频率）
+growthform_total_presence <- species_merged %>%
+  group_by(Growth_Form) %>%
+  summarise(Total_Presence = sum(Presence)) %>%
+  arrange(desc(Total_Presence))
+```
+
+
+```{r}
+# === 加入 Cluster 信息 ===
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster) %>%
+  mutate(Cluster = as.factor(Cluster))
+
+species_with_cluster <- species_merged %>%
+  left_join(env_data, by = "Station") %>%
+  filter(!is.na(Cluster))
+```
+
+
+```{r}
+# 每个 Cluster 内，不同 Growth_Form 出现频次
+growthform_by_cluster <- species_with_cluster %>%
+  group_by(Cluster, Growth_Form) %>%
+  summarise(Count = n(), .groups = "drop")
+
+# 加入每个 Cluster 的总和，计算百分比
+growthform_percent <- growthform_by_cluster %>%
+  group_by(Cluster) %>%
+  mutate(Percent = round(Count / sum(Count) * 100, 1))
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(growthform_percent, aes(x = Cluster, y = Percent, fill = Growth_Form)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Growth Form Composition by Cluster", y = "Percent", x = "Cluster") +
+  theme_minimal(base_size = 12)
+```
+
+```{r}
+# === 加载必要的包 ===
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# === 自定义颜色（确保与你的 Cluster 数量一致）===
+my_colors <- c("tomato", "orange", "forestgreen", "steelblue", "purple", "grey", "darkblue")
+
+# === Step 1. 读取数据 ===
+site_species <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = "Site-Spp Matrix")
+species_info <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = "Species Names and Lifeform")
+
+# === Step 2. 整理 Species Growth Form ===
+species_info_clean <- species_info %>%
+  select(`Species Code`, Growth_Form = `Fern, Climber, Shrub, Herb, Tree, Grass, Sedge, Forb`) %>%
+  filter(!is.na(Growth_Form))
+
+# === Step 3. 整理站点数据为长格式 ===
+species_long <- site_species %>%
+  rename(Station = 1) %>%
+  pivot_longer(-Station, names_to = "Species Code", values_to = "Presence") %>%
+  filter(Presence > 0)
+
+# === Step 4. 加入物种类型信息 ===
+species_with_form <- species_long %>%
+  left_join(species_info_clean, by = "Species Code") %>%
+  filter(!is.na(Growth_Form))
+
+# === Step 5. 加入 Cluster 信息 ===
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster) %>%
+  mutate(Cluster = as.factor(Cluster))
+
+species_full <- species_with_form %>%
+  left_join(env_data, by = "Station") %>%
+  filter(!is.na(Cluster))
+
+# === Step 6. 按 Cluster 和 Growth Form 汇总 ===
+growth_summary <- species_full %>%
+  group_by(Cluster, Growth_Form) %>%
+  summarise(Count = n(), .groups = "drop")
+
+# === Step 7. 可视化 + 自定义颜色 ===
+ggplot(growth_summary, aes(x = Growth_Form, y = Count, fill = Cluster)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = my_colors) +  # 应用自定义颜色
+  labs(title = "Growth Form Counts by Cluster",
+       x = "Growth Form", y = "Count", fill = "Cluster") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(readxl)
+
+# === 1. 读取数据 ===
+pcq_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster)
+
+# === 2. 合并 Cluster 并保留目标物种 ===
+target_species <- c("Kuneri", "Lepsco")
+
+dbh_df <- pcq_data %>%
+  filter(Species %in% target_species, !is.na(Total_Diameter_cm)) %>%
+  select(Station, Species, Total_Diameter_cm) %>%
+  left_join(env_data, by = "Station") %>%
+  filter(!is.na(Cluster)) %>%
+  mutate(Cluster = as.factor(Cluster))
+
+# === 3. 绘图 ===
+ggplot(dbh_df, aes(x = Total_Diameter_cm, fill = Species)) +
+  geom_histogram(binwidth = 2, position = "identity", alpha = 0.6, color = "black") +
+  facet_wrap(~Cluster, scales = "free_y") +
+  scale_fill_manual(values = c("Kuneri" = "tomato", "Lepsco" = "forestgreen")) +
+  labs(
+    title = "DBH Distribution of Kuneri and Lepsco by Cluster",
+    x = "Diameter at Breast Height (cm)",
+    y = "Count",
+    fill = "Species"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(strip.text = element_text(face = "bold"))
+```
+```{r}
+library(ggplot2)
+
+# 更优可视化：点图 + jitter
+ggplot(dbh_df, aes(x = Species, y = Total_Diameter_cm, color = Species)) +
+  geom_jitter(width = 0.15, height = 0, size = 2.5, alpha = 0.8) +
+  facet_wrap(~Cluster, ncol = 3) +
+  scale_color_manual(values = c("Kuneri" = "tomato", "Lepsco" = "forestgreen")) +
+  labs(
+    title = "DBH Distribution of Kuneri and Lepsco (jittered dot plot)",
+    x = "Species", y = "Diameter at Breast Height (cm)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none")
+```
+
+```{r}
+library(readxl)
+library(dplyr)
+library(tidyr)
+
+# === Step 1: 读取 PCQ 数据和 Cluster ===
+pcq <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+env <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster)
+
+# === Step 2: 合并 Nearest 和 Repl 物种 ===
+species_comp <- pcq %>%
+  select(Station, `Nearest Spp`, `Repl Spp`) %>%
+  left_join(env, by = "Station") %>%
+  pivot_longer(cols = c(`Nearest Spp`, `Repl Spp`), names_to = "Tree_Type", values_to = "Species") %>%
+  filter(!is.na(Species), !is.na(Cluster))
+
+# === Step 3: 按 Cluster 和物种计算频率 ===
+species_prop <- species_comp %>%
+  group_by(Cluster, Species) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(Cluster) %>%
+  mutate(Proportion = round(Count / sum(Count), 3)) %>%
+  arrange(Cluster, desc(Proportion))
+
+# === 输出为 CSV 以便可视化 ===
+write.csv(species_prop, "Species_Proportions_by_Cluster.csv", row.names = FALSE)
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(forcats)
+
+# === Step 1: 读取数据 ===
+prop_data <- read_csv("Species_Proportions_by_Cluster.csv")
+
+# === Step 2: 标记每个 Cluster 的前5物种，其他设为 Other ===
+prop_top5 <- prop_data %>%
+  group_by(Cluster) %>%
+  arrange(desc(Proportion)) %>%
+  mutate(Rank = row_number(),
+         Species_grouped = ifelse(Rank <= 5, Species, "Other")) %>%
+  ungroup()
+
+# === Step 3: 重新聚合数据（合并 "Other" 的比例）===
+prop_grouped <- prop_top5 %>%
+  group_by(Cluster, Species_grouped) %>%
+  summarise(Proportion = sum(Proportion), .groups = "drop")
+
+# === Step 4: Pie chart 每个 Cluster 一个 faceted 图 ===
+ggplot(prop_grouped, aes(x = "", y = Proportion, fill = fct_reorder(Species_grouped, Proportion))) +
+  geom_bar(stat = "identity", width = 1, color = "white") +
+  coord_polar("y") +
+  facet_wrap(~ Cluster, ncol = 3) +
+  theme_void(base_size = 14) +
+  theme(
+    legend.title = element_blank(),
+    strip.text = element_text(size = 13, face = "bold"),
+    legend.position = "right"
+  ) +
+  labs(title = "Species Composition by Cluster (Top 5 + Other)")
+
+```
+```{r}
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(forcats)
+
+# === Step 1: 读取数据 ===
+prop_data <- read_csv("Species_Proportions_by_Cluster.csv")
+
+# === Step 2: 每个 Cluster 提取前 5 个物种，其他合并为 "Other" ===
+prop_top5 <- prop_data %>%
+  group_by(Cluster) %>%
+  arrange(desc(Proportion)) %>%
+  mutate(Rank = row_number(),
+         Species_grouped = ifelse(Rank <= 5, Species, "Other")) %>%
+  ungroup()
+
+# === Step 3: 合并 Other，再计算比例 ===
+prop_grouped <- prop_top5 %>%
+  group_by(Cluster, Species_grouped) %>%
+  summarise(Proportion = sum(Proportion), .groups = "drop")
+
+# === Step 4: 设置 Species 顺序，保持 consistent 图例 ===
+prop_grouped <- prop_grouped %>%
+  mutate(Species_grouped = fct_reorder(Species_grouped, -Proportion, .fun = sum))
+
+# === Step 5: 绘制堆叠条形图 ===
+ggplot(prop_grouped, aes(x = factor(Cluster), y = Proportion, fill = Species_grouped)) +
+  geom_bar(stat = "identity", color = "white") +
+  labs(
+    title = "Species Composition by Cluster (Top 5 + Other)",
+    x = "Cluster", y = "Proportion",
+    fill = "Species"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "right",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+```{r}
+library(ggplot2)
+library(readxl)
+library(dplyr)
+
+# 读取数据
+pcq_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster)
+
+# 处理数据
+dbh_data <- pcq_data %>%
+  select(Station, Species, Total_Diameter_cm) %>%
+  rename(DBH_cm = Total_Diameter_cm) %>%
+  left_join(env_data, by = "Station") %>%
+  filter(!is.na(DBH_cm), !is.na(Cluster))
+
+# 绘制直方图
+ggplot(dbh_data, aes(x = DBH_cm, fill = as.factor(Cluster))) +
+  geom_histogram(binwidth = 5, color = "black", alpha = 0.7, position = "identity") +
+  facet_wrap(~Cluster, scales = "free_y") +
+  labs(title = "DBH Distribution by Cluster", x = "DBH (cm)", y = "Count") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(dbh_data, aes(x = DBH_cm, color = as.factor(Cluster))) +
+  geom_density(alpha = 0.4) +
+  labs(title = "DBH Density Distribution", x = "DBH (cm)", y = "Density", fill = "Cluster") +
+  theme_minimal()
+```
+
+```{r}
+dbh_summary <- dbh_data %>%
+  group_by(Cluster, Species) %>%
+  summarise(
+    Mean_DBH = round(mean(DBH_cm, na.rm = TRUE), 1),
+    SD_DBH = round(sd(DBH_cm, na.rm = TRUE), 1),
+    Count = n()
+  ) %>%
+  arrange(Cluster, desc(Mean_DBH))
+
+print(dbh_summary)
+```
+
+```{r}
+focus_species <- c("Kuneri", "Lepsco")  # 代码中根据实际物种代码替换
+
+ggplot(dbh_data %>% filter(Species %in% focus_species),
+       aes(x = DBH_cm, fill = Species)) +
+  geom_histogram(binwidth = 5, color = "black", alpha = 0.6) +
+  facet_wrap(~Cluster) +
+  labs(title = "DBH Distribution of Dominant Species",
+       x = "DBH (cm)", y = "Count") +
+  theme_minimal()
+```
+
+
+```{r}
+library(dplyr)
+library(readxl)
+
+# 读取数据
+pcq_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster)
+
+# 只保留含替代物种记录
+repl_data <- pcq_data %>%
+  select(Station, `Repl Spp`) %>%
+  filter(!is.na(`Repl Spp`)) %>%
+  left_join(env_data, by = "Station") %>%
+  group_by(Cluster, `Repl Spp`) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(Cluster) %>%
+  mutate(Proportion = Count / sum(Count)) %>%
+  arrange(Cluster, desc(Proportion))
+
+# 查看前几行
+print(repl_data)
+```
+
+```{r}
+# === 加载必要包 ===
+library(readxl)
+library(dplyr)
+library(ggplot2)
+
+# === 读取 PCQ Data 和 Cluster 信息 ===
+pcq_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster) %>%
+  filter(!is.na(Cluster)) %>%
+  mutate(Cluster = as.factor(Cluster))
+
+# === 整理替代物种数据（Repl Spp）===
+repl_data <- pcq_data %>%
+  select(Station, `Repl Spp`) %>%
+  rename(Repl_Spp = `Repl Spp`) %>%
+  filter(!is.na(Repl_Spp)) %>%
+  left_join(env_data, by = "Station") %>%
+  filter(!is.na(Cluster))
+
+# === 汇总每个 Cluster 中 Repl Spp 的频率 ===
+repl_freq <- repl_data %>%
+  group_by(Cluster, Repl_Spp) %>%
+  summarise(Freq = n(), .groups = "drop") %>%
+  group_by(Cluster) %>%
+  mutate(Proportion = round(Freq / sum(Freq) * 100, 1)) %>%
+  ungroup()
+
+# === 可视化：柱状图 ===
+ggplot(repl_freq, aes(x = reorder(Repl_Spp, -Freq), y = Freq, fill = Cluster)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~Cluster, scales = "free_x", nrow = 2) +
+  labs(title = "Replacement Species Frequency by Cluster",
+       x = "Replacement Species", y = "Frequency") +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+# 转换为比例
+growth_prop <- growth_summary %>%
+  group_by(Cluster) %>%
+  mutate(Proportion = Count / sum(Count) * 100)
+
+# 可视化：比例堆叠图
+ggplot(growth_prop, aes(x = Cluster, y = Proportion, fill = Growth_Form)) +
+  geom_col() +
+  labs(title = "Growth Form Proportions by Cluster",
+       x = "Cluster", y = "Proportion (%)", fill = "Growth Form") +
+  theme_minimal(base_size = 14)
+```
+
+```{r}
+ggplot(growth_summary, aes(x = Growth_Form, y = Count, fill = Growth_Form)) +
+  geom_col() +
+  facet_wrap(~Cluster, scales = "free_y") +
+  labs(title = "Growth Form Counts by Cluster",
+       x = "Growth Form", y = "Count") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(growth_summary, aes(x = Growth_Form, y = Count, fill = Growth_Form)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~Cluster, scales = "free_y") +
+  scale_fill_brewer(palette = "Paired") +  # 自动颜色，辨识度高
+  labs(title = "Growth Form Counts by Cluster",
+       x = "Growth Form", y = "Count") +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+growth_prop <- growth_summary %>%
+  group_by(Cluster) %>%
+  mutate(Proportion = Count / sum(Count) * 100)
+
+ggplot(growth_prop, aes(x = Cluster, y = Proportion, fill = Growth_Form)) +
+  geom_col(width = 0.7, color = "white") +
+  scale_fill_brewer(palette = "Paired") +  # 同样使用自动色盘
+  labs(title = "Proportional Composition of Growth Forms by Cluster",
+       x = "Cluster", y = "Proportion (%)", fill = "Growth Form") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "right",
+        axis.text.x = element_text(size = 10))
+
+```
+
+```{r}
+# 只保留 Top 5，其余归为 "Other"
+growth_summary_top5 <- growth_summary %>%
+  group_by(Cluster) %>%
+  mutate(Rank = rank(-Count)) %>%
+  mutate(Growth_Form_Short = ifelse(Rank <= 5, Growth_Form, "Other")) %>%
+  group_by(Cluster, Growth_Form_Short) %>%
+  summarise(Count = sum(Count), .groups = "drop")
+
+# 可视化 Top 5 + Other
+ggplot(growth_summary_top5, aes(x = Growth_Form_Short, y = Count, fill = Growth_Form_Short)) +
+  geom_col() +
+  facet_wrap(~Cluster, scales = "free_y") +
+  labs(title = "Top 5 Growth Forms by Cluster (Other Combined)",
+       x = "Growth Form", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+library(vegan)
+library(tibble)
+
+gf_matrix <- growth_summary %>%
+  pivot_wider(names_from = Growth_Form, values_from = Count, values_fill = 0) %>%
+  column_to_rownames("Cluster")
+
+
+# 将 Cluster 列设为行名
+rownames(gf_matrix) <- gf_matrix$Cluster
+gf_matrix <- gf_matrix[, -1]  # 删除 Cluster 列
+
+# 宽格式：每列是一个 growth form
+gf_matrix <- growth_summary %>%
+  pivot_wider(names_from = Growth_Form, values_from = Count, values_fill = 0) %>%
+  column_to_rownames("Cluster")
+
+# 计算 Shannon 多样性
+shannon <- diversity(gf_matrix, index = "shannon")
+shannon_df <- data.frame(Cluster = names(shannon), Shannon = shannon)
+
+print(shannon_df)
+```
+
+
+```{r}
+tree_fern_summary <- pcq_data %>%
+  filter(!is.na(`Tree Fern Species`)) %>%
+  left_join(env_data, by = "Station") %>%
+  group_by(Cluster, `Tree Fern Species`) %>%
+  summarise(
+    Frequency = n_distinct(Station),
+    Mean_Ht = mean(`TRF Hgt (m)`, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+
+```{r}
+
+```
+
+```{r}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# 加载数据
+pcq_tree <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data")
+
+# 替代种频率 by Cluster
+replace_freq <- pcq_tree %>%
+  filter(!is.na(`Repl Spp`)) %>%
+  group_by(Station, `Repl Spp`) %>%
+  summarise(freq = n(), .groups = "drop") %>%
+  left_join(env_data, by = "Station") %>%
+  group_by(Cluster, `Repl Spp`) %>%
+  summarise(count = sum(freq), .groups = "drop") %>%
+  pivot_wider(names_from = `Repl Spp`, values_from = count, values_fill = 0)
+
+# 绘制热图
+replace_matrix <- as.matrix(replace_freq[,-1])
+rownames(replace_matrix) <- replace_freq$Cluster
+
+heatmap(replace_matrix, scale = "row", Colv = NA, Rowv = NA,
+        col = heat.colors("256"), margins = c(6,10),
+        main = "Replacement species frequency by Cluster")
+
+```
+
+
+```{r}
+self_replace_ratio <- pcq_tree %>%
+  filter(!is.na(`Repl Spp`), !is.na(`Nearest Spp`)) %>%
+  mutate(self_replace = `Repl Spp` == `Nearest Spp`) %>%
+  left_join(env_data, by = "Station") %>%
+  group_by(Cluster) %>%
+  summarise(
+    total = n(),
+    self_replacing = sum(self_replace),
+    self_replace_ratio = self_replacing / total
+  )
+
+# 可视化
+ggplot(self_replace_ratio, aes(x = Cluster, y = self_replace_ratio, fill = Cluster)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Self-replacement Ratio by Cluster", y = "Proportion", x = "Cluster") +
+  theme_minimal()
+```
+
+
+```{r}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+
+# 自定义颜色
+my_colors <- c("tomato", "orange", "forestgreen", "steelblue", "purple", "grey", "darkblue")
+
+# === 1. 读取数据 ===
+pcq_tree <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster) %>%
+  mutate(Cluster = as.factor(Cluster))
+
+
+self_replace_ratio <- pcq_tree %>%
+  filter(!is.na(`Repl Spp`), !is.na(`Nearest Spp`)) %>%
+  mutate(self_replace = `Repl Spp` == `Nearest Spp`) %>%
+  left_join(env_data, by = "Station") %>%
+  filter(!is.na(Cluster)) %>%
+  group_by(Cluster) %>%
+  summarise(
+    total = n(),
+    self_replacing = sum(self_replace),
+    self_replace_ratio = self_replacing / total
+  )
+
+# === 3. 可视化 ===
+ggplot(self_replace_ratio, aes(x = Cluster, y = self_replace_ratio, fill = as.factor(Cluster))) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = my_colors[1:length(unique(self_replace_ratio$Cluster))]) +
+  labs(title = "Self-replacement Ratio by Cluster", y = "Proportion", x = "Cluster") +
+  theme_minimal()
+
+```
+
+
+```{r}
+# === 加载所需包 ===
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(vegan)
+
+# === 读取数据 ===
+pcq_tree <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster) %>%
+  mutate(Cluster = as.factor(Cluster))
+
+# === 构建替代树种矩阵（每个Cluster中替代树种的频数）===
+replace_matrix <- pcq_tree %>%
+  filter(!is.na(`Repl Spp`)) %>%
+  left_join(env_data, by = "Station") %>%
+  count(Cluster, `Repl Spp`) %>%
+  pivot_wider(names_from = `Repl Spp`, values_from = n, values_fill = 0)
+
+# 去掉 Cluster 为 NA 的行
+replace_matrix_clean <- replace_matrix %>%
+  filter(!is.na(Cluster))
+
+# 设置 Cluster 为行名
+rownames(replace_matrix_clean) <- replace_matrix_clean$Cluster
+replace_mat <- replace_matrix_clean[, -1]  # 去掉 Cluster 列
+
+
+shannon_scores <- diversity(replace_mat, index = "shannon")
+
+# === 可视化 ===
+shannon_df <- data.frame(Cluster = rownames(replace_mat), Shannon = shannon_scores)
+
+ggplot(shannon_df, aes(x = Cluster, y = Shannon, fill = Cluster)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = my_colors[1:length(unique(shannon_df$Cluster))]) +
+  labs(title = "Shannon Diversity of Replacement Species", 
+       y = "Shannon Index", 
+       x = "Cluster") +
+  theme_minimal()
+```
+```{r}
+# 汇总每个 Cluster 的均值和标准差
+summary_df <- diversity_df %>%
+  group_by(Cluster) %>%
+  summarise(
+    Shannon_mean = round(mean(Shannon), 2),
+    Shannon_sd = round(sd(Shannon), 2),
+    Richness_mean = round(mean(Richness), 2),
+    Richness_sd = round(sd(Richness), 2),
+    Evenness_mean = round(mean(Evenness), 2),
+    Evenness_sd = round(sd(Evenness), 2)
+  )
+
+# 打印出来作为表格放入附录
+print(summary_df)
+```
+
+
+```{r}
+# === 加载必要包 ===
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(vegan)
+library(ggplot2)
+
+# === 读取数据 ===
+pcq_tree <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster)
+
+# === 自定义颜色（按 Cluster 数量调整）===
+my_colors <- c("tomato", "orange", "forestgreen", "steelblue", "purple", "grey", "darkblue")
+
+# === 创建 Cluster × Species 的 abundance 矩阵 ===
+species_matrix <- pcq_tree %>%
+  filter(!is.na(`Nearest Spp`)) %>%
+  left_join(env_data, by = "Station") %>%
+  filter(!is.na(Cluster)) %>%
+  group_by(Cluster, `Nearest Spp`) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  pivot_wider(names_from = `Nearest Spp`, values_from = count, values_fill = 0) %>%
+  column_to_rownames("Cluster")
+
+# === 计算 Shannon 多样性指数与 Evenness ===
+shannon_values <- diversity(species_matrix, index = "shannon")  # H'
+richness <- specnumber(species_matrix)  # S（物种丰富度）
+evenness <- shannon_values / log(richness)  # Pielou’s evenness = H'/ln(S)
+
+# === 合并为一个 DataFrame 并转为可视化格式 ===
+diversity_df <- data.frame(
+  Cluster = rownames(species_matrix),
+  Shannon = shannon_values,
+  Richness = richness,
+  Evenness = evenness
+)
+
+# === 可视化：Shannon 多样性 ===
+ggplot(diversity_df, aes(x = Cluster, y = Shannon, fill = Cluster)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = my_colors) +
+  labs(title = "Shannon Diversity Index by Cluster",
+       y = "Shannon Index (H')", x = "Cluster") +
+  theme_minimal()
+
+# === 可视化：Evenness ===
+ggplot(diversity_df, aes(x = Cluster, y = Evenness, fill = Cluster)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = my_colors) +
+  labs(title = "Pielou's Evenness by Cluster",
+       y = "Evenness (H'/ln(S))", x = "Cluster") +
+  theme_minimal()
+```
+
+
+```{r}
+# === 1. 加载 R 包 ===
+library(readxl)
+library(dplyr)
+library(vegan)
+library(ggplot2)
+
+# === 2. 读取 Excel 数据 ===
+species_matrix <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = 1)
+species_matrix <- as.data.frame(species_matrix)
+
+# 将第一列设为行名
+rownames(species_matrix) <- species_matrix[[1]]
+species_matrix <- species_matrix[, -1]
+
+# === 3. 计算 Shannon 多样性指数、Simpson 指数、Pielou’s Evenness ===
+diversity_df <- data.frame(
+  Shannon = diversity(species_matrix, index = "shannon"),
+  Simpson = diversity(species_matrix, index = "simpson"),
+  Richness = specnumber(species_matrix)
+)
+diversity_df$Evenness <- diversity_df$Shannon / log(diversity_df$Richness)
+
+# 将站点信息加入
+diversity_df$Station <- rownames(diversity_df)
+
+# === 4. 加入 Cluster 信息 ===
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster) %>%
+  mutate(Cluster = as.factor(Cluster))
+
+diversity_df <- left_join(diversity_df, env_data, by = "Station")
+
+# === 5. 可视化 Shannon 和 Evenness ===
+my_colors <- c("tomato", "orange", "forestgreen", "steelblue", "purple", "grey", "darkblue")
+
+ggplot(diversity_df, aes(x = Cluster, y = Shannon, fill = Cluster)) +
+  geom_boxplot() +
+  scale_fill_manual(values = my_colors) +
+  labs(title = "Shannon Diversity by Cluster", x = "Cluster", y = "Shannon Index") +
+  theme_minimal()
+
+ggplot(diversity_df, aes(x = Cluster, y = Evenness, fill = Cluster)) +
+  geom_boxplot() +
+  scale_fill_manual(values = my_colors) +
+  labs(title = "Evenness by Cluster", x = "Cluster", y = "Pielou's Evenness") +
+  theme_minimal()
+
+```
+
+```{r}
+# === 1. 加载所需包 ===
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(RColorBrewer)
+
+# === 2. 读取数据 ===
+pcq_tree <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data")
+
+# === 3. 计算替代种频率 ===
+replace_freq <- pcq_tree %>%
+  filter(!is.na(`Repl Spp`)) %>%
+  group_by(Station, `Repl Spp`) %>%
+  summarise(freq = n(), .groups = "drop") %>%
+  left_join(env_data, by = "Station") %>%
+  group_by(Cluster, `Repl Spp`) %>%
+  summarise(count = sum(freq), .groups = "drop") %>%
+  pivot_wider(names_from = `Repl Spp`, values_from = count, values_fill = 0)
+
+# === 4. 准备热图矩阵 ===
+replace_matrix <- as.matrix(replace_freq[,-1])
+rownames(replace_matrix) <- replace_freq$Cluster
+
+# === 5. 创建颜色渐变（使用 RColorBrewer）===
+my_colors <- colorRampPalette(brewer.pal(9, "YlGnBu"))(256)
+
+# === 6. 绘制热图 ===
+heatmap(replace_matrix,
+        scale = "row",          # 按行标准化
+        Colv = NA,              # 不进行列聚类
+        Rowv = NA,              # 不进行行聚类
+        col = my_colors,        # 使用自定义颜色
+        margins = c(6, 10),     # 调整边距
+        main = "Replacement Species Frequency by Cluster")
+```
+
+```{r}
+library(readxl)
+library(sf)
+library(ggplot2)
+library(ggspatial)
+library(rnaturalearth)
+library(rnaturalearthdata)
+
+lcdb <- st_read("~/Downloads/lris-lcdb-v50-land-cover-database-version-50-mainland-new-zealand-SHP/lcdb-v50-land-cover-database-version-50-mainland-new-zealand.shp")
+# 确保是 NZTM2000 坐标系（EPSG:2193）
+lcdb <- st_transform(lcdb, 2193)
+
+# 读取站点数据
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data")
+env_clean <- env_data[!is.na(env_data$`East NZTM`) & !is.na(env_data$`North NZTM`), ]
+sites_sf <- st_as_sf(env_clean, coords = c("East NZTM", "North NZTM"), crs = 2193)
+
+# 用采样点生成裁剪范围
+bbox_buffer <- st_bbox(sites_sf) + c(-15000, -15000, 15000, 15000)
+bbox_poly <- st_as_sfc(bbox_buffer, crs = 2193)
+
+# 裁剪 LCDB 数据（这部分是地图背景）
+lcdb_clip <- st_intersection(lcdb, bbox_poly)
+
+ggplot() +
+  geom_sf(data = lcdb_clip, aes(fill = Name_2018), color = NA, alpha = 0.6) +
+  geom_sf(data = sites_sf, color = "red", size = 3) +
+  geom_text(data = as.data.frame(sites_sf),
+            aes(x = st_coordinates(sites_sf)[,1],
+                y = st_coordinates(sites_sf)[,2],
+                label = Station),
+            size = 3, hjust = -0.1, vjust = -0.5) +
+  annotation_scale(location = "bl") +
+  annotation_north_arrow(location = "tl", which_north = "true") +
+  labs(title = "Site Locations with LCDB Land Cover Background (Great Barrier Island)",
+       caption = "Data: LCDB v5.0, Projection: NZTM2000") +
+  theme_minimal()
+
+```
+
+```{r}
+library(readxl)
+library(sf)
+library(ggplot2)
+library(ggspatial)
+library(ggrepel)
+
+# 读取 LCDB shapefile
+lcdb <- st_read("~/Downloads/lris-lcdb-v50-land-cover-database-version-50-mainland-new-zealand-SHP/lcdb-v50-land-cover-database-version-50-mainland-new-zealand.shp")
+lcdb <- st_transform(lcdb, 2193)  # 转换为 NZTM2000 坐标系
+
+# 读取站点数据
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data")
+env_clean <- env_data[!is.na(env_data$`East NZTM`) & !is.na(env_data$`North NZTM`), ]
+sites_sf <- st_as_sf(env_clean, coords = c("East NZTM", "North NZTM"), crs = 2193)
+
+
+# 扩大缓冲区范围（±15km）
+bbox_buffer <- st_bbox(sites_sf) + c(-2000, -2000, 2000, 2000)
+bbox_poly <- st_as_sfc(bbox_buffer, crs = 2193)
+
+# 裁剪 LCDB 图层作为背景
+lcdb_clip <- st_intersection(lcdb, bbox_poly)
+
+# 生成坐标数据框 + 清除 NA 防止 repel 报错
+coords_df <- cbind(as.data.frame(sites_sf), st_coordinates(sites_sf))
+coords_df <- coords_df[!is.na(coords_df$Station) & !is.na(coords_df$X) & !is.na(coords_df$Y), ]
+
+# 绘图
+ggplot() +
+  geom_sf(data = lcdb_clip, aes(fill = Name_2018), color = NA, alpha = 0.6) +
+  geom_sf(data = sites_sf, color = "red", size = 3) +
+  geom_text_repel(data = coords_df,
+                  aes(x = X, y = Y, label = Station),
+                  size = 3.5, box.padding = 0.4, segment.color = "black", max.overlaps = 100) +
+  annotation_scale(location = "bl", width_hint = 0.2) +
+  annotation_north_arrow(location = "tl", which_north = "true") +
+  labs(
+    title = "Site Locations with LCDB Land Cover Background (Great Barrier Island)",
+    caption = "Data: LCDB v5.0, Projection: NZTM2000",
+    fill = "Land Cover Type"
+  ) +
+  coord_sf(xlim = c(bbox_buffer["xmin"], bbox_buffer["xmax"]),
+           ylim = c(bbox_buffer["ymin"], bbox_buffer["ymax"])) +
+  scale_x_continuous(labels = scales::label_number(big.mark = ",")) +
+  scale_y_continuous(labels = scales::label_number(big.mark = ",")) +
+  theme_minimal()+
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 9),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.7, "cm"),
+    legend.box = "vertical",
+    plot.caption = element_text(hjust = 1, size = 9),
+    axis.title = element_blank(),
+    axis.text = element_text(size = 10)
+  ) +
+  guides(fill = guide_legend(nrow = 3, byrow = TRUE))+
+  geom_text_repel(
+  data = coords_df[grepl("-1$", coords_df$Station), ],
+  aes(x = X, y = Y, label = Station),
+  size = 3.5,
+  box.padding = 0.4,
+  segment.color = "black",
+  max.overlaps = Inf
+)
+ggplot() +
+  geom_sf(data = lcdb_clip, aes(fill = Name_2018), color = NA, alpha = 0.6) +
+  geom_sf(data = sites_sf, color = "red", size = 3) +
+  geom_text_repel(
+    data = coords_df[grepl("-1$", coords_df$Station), ],
+    aes(x = X, y = Y, label = Station),
+    size = 3.5,
+    box.padding = 0.4,
+    segment.color = "grey40",
+    max.overlaps = Inf
+  ) +
+  annotation_scale(location = "bl", width_hint = 0.2) +
+  annotation_north_arrow(location = "tl", which_north = "true") +
+  labs(
+    title = "Site Locations with LCDB Land Cover Background (Great Barrier Island)",
+    caption = "Data: LCDB v5.0, Projection: NZTM2000",
+    fill = "Land Cover Type"
+  ) +
+  coord_sf(xlim = c(bbox_buffer["xmin"], bbox_buffer["xmax"]),
+           ylim = c(bbox_buffer["ymin"], bbox_buffer["ymax"])) +
+  scale_x_continuous(labels = scales::label_number(big.mark = ",")) +
+  scale_y_continuous(labels = scales::label_number(big.mark = ",")) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 9),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.7, "cm"),
+    legend.box = "vertical",
+    plot.caption = element_text(hjust = 1, size = 9),
+    axis.title = element_blank(),
+    axis.text = element_text(size = 10)
+  ) +
+  guides(fill = guide_legend(nrow = 3, byrow = TRUE))
+
+
+ggsave("great_barrier_map_clean.png", width = 14, height = 20, dpi = 300)
+```
+
+```{r}
+library(readxl)
+library(sf)
+library(ggplot2)
+library(ggspatial)
+library(ggrepel)
+
+# 读取 LCDB shapefile
+lcdb <- st_read("~/Downloads/lris-lcdb-v50-land-cover-database-version-50-mainland-new-zealand-SHP/lcdb-v50-land-cover-database-version-50-mainland-new-zealand.shp")
+lcdb <- st_transform(lcdb, 2193)  # 转换为 NZTM2000 坐标系
+
+# 读取站点数据
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data")
+env_clean <- env_data[!is.na(env_data$`East NZTM`) & !is.na(env_data$`North NZTM`), ]
+sites_sf <- st_as_sf(env_clean, coords = c("East NZTM", "North NZTM"), crs = 2193)
+
+# 扩大缓冲区范围（±2000m）
+bbox_buffer <- st_bbox(sites_sf) + c(-2000, -2000, 2000, 2000)
+bbox_poly <- st_as_sfc(bbox_buffer, crs = 2193)
+
+# 裁剪 LCDB 图层作为背景
+lcdb_clip <- st_intersection(lcdb, bbox_poly)
+
+# 生成坐标数据框
+coords_df <- cbind(as.data.frame(sites_sf), st_coordinates(sites_sf))
+coords_df <- coords_df[!is.na(coords_df$Station) & !is.na(coords_df$X) & !is.na(coords_df$Y), ]
+
+# ✅ 自定义要额外标注的偏移点
+extra_labels <- c("TZCM-2", "TZCM-9", "RGX-3")
+
+# ✅ 生成只标注 -1 和偏移点的标签数据
+label_df <- coords_df[grepl("-1$", coords_df$Station) | coords_df$Station %in% extra_labels, ]
+
+# ✅ 绘图
+ggplot() +
+  geom_sf(data = lcdb_clip, aes(fill = Name_2018), color = NA, alpha = 0.6) +
+  geom_sf(data = sites_sf, color = "red", size = 3) +
+  geom_text_repel(
+    data = label_df,
+    aes(x = X, y = Y, label = Station),
+    size = 3.5,
+    box.padding = 0.4,
+    segment.color = "black",
+    max.overlaps = Inf
+  ) +
+  annotation_scale(location = "bl", width_hint = 0.2) +
+  annotation_north_arrow(location = "tl", which_north = "true") +
+  labs(
+    title = "Site Locations with LCDB Land Cover Background (Great Barrier Island)",
+    caption = "Data: LCDB v5.0, Projection: NZTM2000",
+    fill = "Land Cover Type"
+  ) +
+  coord_sf(xlim = c(bbox_buffer["xmin"], bbox_buffer["xmax"]),
+           ylim = c(bbox_buffer["ymin"], bbox_buffer["ymax"])) +
+  scale_x_continuous(labels = scales::label_number(big.mark = ",")) +
+  scale_y_continuous(labels = scales::label_number(big.mark = ",")) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 9),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.7, "cm"),
+    legend.box = "vertical",
+    plot.caption = element_text(hjust = 1, size = 9),
+    axis.title = element_blank(),
+    axis.text = element_text(size = 10)
+  ) +
+  guides(fill = guide_legend(nrow = 3, byrow = TRUE))
+
+# ✅ 导出图片
+ggsave("great_barrier_map_clean1.png", width = 14, height = 20, dpi = 300)
+```
+
+```{r}
+# —— 加载包 —— 
+library(readxl)
+library(dplyr)
+library(sf)
+library(ggplot2)
+library(ggspatial)
+library(ggrepel)
+```
+
+```{r}
+
+# —— 读取并清理数据 —— 
+data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  mutate(`East NZTM` = as.numeric(`East NZTM`),
+         `North NZTM` = as.numeric(`North NZTM`)) %>%
+  filter(!is.na(`East NZTM`) & !is.na(`North NZTM`)) %>%
+  filter(!Station %in% c("RGX-3", "TZCM-9", "TZCM-2", "JHP-3"))
+
+# —— 转换为 sf 对象 —— 
+sites_sf <- st_as_sf(data, coords = c("East NZTM", "North NZTM"), crs = 2193)
+
+# —— 转换为 WGS84 用于底图叠加 —— 
+sites_wgs <- st_transform(sites_sf, crs = 4326)
+
+p <- ggplot() +
+  annotation_map_tile(type = "osm", zoomin = 0) +
+  geom_sf(data = sites_wgs, color = "red", size = 2) +
+  geom_text_repel(
+    data = sites_wgs,
+    aes(label = Station, geometry = geometry),
+    stat = "sf_coordinates",
+    size = 3,
+    box.padding = 0.5,
+    point.padding = 0.2,
+    segment.size = 0.3,
+    min.segment.length = 0,
+    seed = 42,
+    color = "black"
+  ) +
+  annotation_scale(location = "tl", width_hint = 0.3) +
+  annotation_north_arrow(location = "br", which_north = "true",
+                         style = north_arrow_fancy_orienteering()) +
+  labs(
+    title = "Kaiaraara PCQ Sample Sites with OSM Background",
+    x = NULL, y = NULL
+  ) +
+  theme_minimal()
+
+# —— 显示 —— 
+print(p)
+
+```
+
+
+```{r}
+# === 0. 加载包 ===
+library(readxl)
+library(dplyr)
+library(ggplot2)
+
+# === 1. 读取数据 ===
+pcq_tree <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "PCQ Data")
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster, `Slope (°)`, `Canopy Hgt (m)`, `Topo Unit (1-5)`) %>%
+  rename(
+    Slope = `Slope (°)`,
+    CanopyHgt = `Canopy Hgt (m)`,
+    TopoUnit = `Topo Unit (1-5)`
+  ) %>%
+  mutate(Cluster = as.factor(Cluster))
+
+# === 2. 提取 PCQ 数据 ===
+pcq_raw <- pcq_tree %>%
+  select(Station, Quarter, `Distance (m)`, Total_Diameter_cm) %>%
+  rename(Distance = `Distance (m)`, DBH = Total_Diameter_cm)
+
+# === 3. 结构指标计算函数 ===
+calculate_metrics <- function(df) {
+  mean_r <- mean(df$Distance, na.rm = TRUE)
+  density <- 10000 / (mean_r ^ 2)
+
+  ba_per_tree <- pi * (df$DBH / 200)^2  # DBH 单位 cm → m，计算 BA（m²）
+  ba_total <- sum(ba_per_tree, na.rm = TRUE)  # 总 BA（单位 m²）
+
+  avg_dbh <- mean(df$DBH, na.rm = TRUE)
+
+  return(data.frame(
+    Density_trees_ha = round(density, 1),
+    Mean_DBH_cm = round(avg_dbh, 1),
+    Basal_Area_m2_total = round(ba_total, 2)
+  ))
+}
+
+# === 4. 计算每个站点的结构指标 ===
+structure_by_station <- pcq_raw %>%
+  group_by(Station) %>%
+  do(calculate_metrics(.)) %>%
+  ungroup()
+
+# === 5. 修复缺失判断逻辑 ===
+all_stations <- unique(env_data$Station)
+existing_stations <- unique(structure_by_station$Station)
+missing_stations <- setdiff(all_stations, existing_stations)
+
+if (length(missing_stations) > 0) {
+  structure_missing <- data.frame(
+    Station = missing_stations,
+    Density_trees_ha = NA,
+    Mean_DBH_cm = NA,
+    Basal_Area_m2_total = NA
+  )
+} else {
+  structure_missing <- data.frame(
+    Station = character(),
+    Density_trees_ha = numeric(),
+    Mean_DBH_cm = numeric(),
+    Basal_Area_m2_total = numeric()
+  )
+}
+
+
+# === 6. 合并结构数据与环境变量 ===
+structure_full <- bind_rows(structure_by_station, structure_missing) %>%
+  left_join(env_data, by = "Station") %>%
+  arrange(Station)
+
+# === 7. 汇总每个 Cluster 的结构均值 ± SD ===
+summary_by_cluster <- structure_full %>%
+  filter(!is.na(Cluster)) %>%
+  group_by(Cluster) %>%
+  summarise(
+    n = n(),
+    Density_mean = round(mean(Density_trees_ha, na.rm = TRUE), 1),
+    Density_sd = round(sd(Density_trees_ha, na.rm = TRUE), 1),
+    DBH_mean = round(mean(Mean_DBH_cm, na.rm = TRUE), 1),
+    DBH_sd = round(sd(Mean_DBH_cm, na.rm = TRUE), 1),
+    BA_total_mean = round(mean(Basal_Area_m2_total, na.rm = TRUE), 2),
+    BA_total_sd = round(sd(Basal_Area_m2_total, na.rm = TRUE), 2),
+    Slope_mean = round(mean(Slope, na.rm = TRUE), 1),
+    Slope_sd = round(sd(Slope, na.rm = TRUE), 1),
+    CanopyHgt_mean = round(mean(CanopyHgt, na.rm = TRUE), 1),
+    CanopyHgt_sd = round(sd(CanopyHgt, na.rm = TRUE), 1),
+    TopoUnit_median = median(TopoUnit, na.rm = TRUE)
+  )
+
+# === 8. 导出 CSV ===
+write.csv(summary_by_cluster, "Cluster_Structure_Summary_m2_only.csv", row.names = FALSE)
+write.csv(structure_full, "Site_Structure_Data_m2_only.csv", row.names = FALSE)
+
+# === 9. 查看结果预览（可选）===
+print(summary_by_cluster)
+
+```
+
+```{r}
+# 画每个站点的 Basal Area（总值，单位 m²）按 Cluster 分布
+ggplot(structure_full, aes(x = Cluster, y = Basal_Area_m2_total, fill = Cluster)) +
+  geom_boxplot() +
+  labs(
+    title = "Basal Area (m² per site) by Cluster",
+    x = "Cluster",
+    y = "Basal Area (m²)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+```{r}
+# === 基于物种的结构分析（Top 2 per Cluster）===
+library(dplyr)
+library(ggplot2)
+library(readxl)
+
+# 确保 pcq_tree 和 env_data 已加载
+# pcq_tree 包含物种名字段 Species，胸径字段 Total_Diameter_cm，站点字段 Station
+
+# Step 1: 合并 Cluster 信息
+species_data <- pcq_tree %>%
+  filter(!is.na(Total_Diameter_cm), !is.na(Species)) %>%
+  left_join(env_data, by = "Station") %>%
+  mutate(
+    BA_m2 = pi * (Total_Diameter_cm / 200)^2  # 计算基面积
+  )
+
+# Step 2: 计算物种的密度和总 BA
+species_summary <- species_data %>%
+  group_by(Cluster, Species) %>%
+  summarise(
+    Count = n(),
+    Total_BA = round(sum(BA_m2, na.rm = TRUE), 2),
+    .groups = "drop"
+  ) %>%
+  arrange(Cluster, desc(Total_BA))
+
+# Step 3: 提取每个 Cluster 的 Top 2 主导种
+top_species <- species_summary %>%
+  group_by(Cluster) %>%
+  slice_max(order_by = Total_BA, n = 2, with_ties = FALSE) %>%
+  ungroup()
+
+# Step 4: 保存为 CSV
+
+
+```
+
+```{r}
+# 如果有很多 Cluster，建议分面绘图
+ggplot(top_species, aes(x = reorder(Species, -Total_BA), y = Total_BA, fill = Cluster)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ Cluster, scales = "free") +
+  labs(
+    title = "Top 2 Species by Basal Area in Each Cluster",
+    x = "Species",
+    y = "Total Basal Area (m²)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# 假设 top_species 数据包含 Cluster, Species, Total_BA, Count
+
+# Step 1: 创建一个缩放因子，把 Count 缩放到 Basal Area 的量级
+max_ba <- max(top_species$Total_BA, na.rm = TRUE)
+max_count <- max(top_species$Count, na.rm = TRUE)
+scale_factor <- max_ba / max_count
+
+# Step 2: 创建图表
+ggplot(top_species, aes(x = reorder(Species, -Total_BA))) +
+  geom_col(aes(y = Total_BA), fill = "skyblue") +
+  geom_line(aes(y = Count * scale_factor, group = 1), color = "orange", size = 1) +
+  geom_point(aes(y = Count * scale_factor), color = "orange", size = 2) +
+  facet_wrap(~ Cluster, scales = "free_x") +
+  scale_y_continuous(
+    name = "Basal Area (m²)",
+    sec.axis = sec_axis(~ . / scale_factor, name = "Count (number of individuals)")
+  ) +
+  labs(
+    title = "Top 2 Species per Cluster: Basal Area and Count",
+    x = "Species"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.y.right = element_text(color = "orange"),
+    axis.text.y.right = element_text(color = "orange"),
+    axis.title.y.left = element_text(color = "skyblue"),
+    axis.text.y.left = element_text(color = "skyblue")
+  )
+```
+
+```{r}
+top_species <- species_data %>%
+  group_by(Cluster, Species) %>%
+  summarise(
+    Count = n(),
+    Mean_DBH = round(mean(Total_Diameter_cm, na.rm = TRUE), 1),
+    Total_BA = round(sum(BA_m2, na.rm = TRUE), 2),
+    .groups = "drop"
+  ) %>%
+  arrange(Cluster, desc(Total_BA)) %>%
+  group_by(Cluster) %>%
+  slice_max(order_by = Total_BA, n = 2, with_ties = FALSE) %>%
+  ungroup()
+
+write.csv(top_species, "Top2_Species_BA_and_Count_per_Cluster.csv", row.names = FALSE)
+```
+
+```{r}
+ggplot(top_species, aes(x = reorder(Species, -Mean_DBH), y = Mean_DBH, fill = Cluster)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ Cluster, scales = "free_x") +
+  geom_text(aes(label = paste0("n=", Count)), vjust = -0.5, size = 3.2) +
+  labs(
+    title = "Mean DBH (cm) of Top 2 Dominant Species per Cluster",
+    x = "Species",
+    y = "Mean DBH (cm)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r}
+ggplot(top_species, aes(x = reorder(Species, -Mean_DBH), y = Mean_DBH, fill = Cluster)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ Cluster, scales = "free_x") +
+  geom_text(aes(label = paste0("n=", Count)), vjust = -0.5, size = 3.2) +
+  labs(
+    title = "Mean DBH (cm) of Top 2 Dominant Species per Cluster",
+    x = "Species",
+    y = "Mean DBH (cm)"
+  ) +
+  scale_fill_manual(values = c(
+  1 = "#EF5350",   # red
+  2 = "#FFB300",   # gold
+  3 = "#8BC34A",   # green
+  4 = "#4DD0E1",   # teal
+  5 = "#42A5F5",   # blue
+  6 = "#BA68C8",   # violet
+  7 = "#EC407A"    # pink
+
+
+  )) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+# === 6. 计算每个 Cluster 的 Shannon 和 Evenness 的均值与标准差 ===
+summary_table <- diversity_df %>%
+  group_by(Cluster) %>%
+  summarise(
+    Mean_Shannon = round(mean(Shannon, na.rm = TRUE), 2),
+    SD_Shannon = round(sd(Shannon, na.rm = TRUE), 2),
+    Mean_Evenness = round(mean(Evenness, na.rm = TRUE), 2),
+    SD_Evenness = round(sd(Evenness, na.rm = TRUE), 2),
+    n = n()
+  )
+
+# === 7. 导出为 CSV（可选） ===
+write.csv(summary_table, "summary_diversity.csv", row.names = FALSE)
+
+# === 8. 查看结果（可选）===
+print(summary_table)
+```
+
+```{r}
+# === 加载所需包 ===
+library(readxl)
+library(dplyr)
+library(tidyr)
+
+# === 读取物种信息（Sheet 2）===
+species_info <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = 2)
+
+# 检查列名，重命名方便处理
+colnames(species_info)[4] <- "Status"
+
+# 筛选出外来种（Exotic）代码
+exotic_species <- species_info %>%
+  filter(Status == "E") %>%
+  select(`Species Code`) %>%
+  pull()
+
+# === 读取样地矩阵数据（Sheet 1）===
+species_matrix <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = 1)
+
+# 将第一列设为行名，准备矩阵
+rownames(species_matrix) <- species_matrix[[1]]
+species_matrix <- species_matrix[, -1]
+
+# 筛选出外来种在样地中的频次（列匹配）
+exotic_matrix <- species_matrix[, colnames(species_matrix) %in% exotic_species]
+
+# 计算每个样地中外来种的总 abundance（出现次数总和）
+exotic_summary <- data.frame(
+  Station = rownames(exotic_matrix),
+  Total_Exotic_Count = rowSums(exotic_matrix)
+)
+
+# 显示结果
+print(exotic_summary)
+```
+```{r}
+# === 加载所需包 ===
+library(readxl)
+library(dplyr)
+library(tidyr)
+
+# === 1. 读取数据 ===
+# 读取物种矩阵
+species_matrix <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = 1)
+species_info <- species_matrix[, 1:5]  # 前5列为物种信息
+abundance_data <- species_matrix[, -c(2:5)]  # 去除信息列，仅保留站点矩阵
+
+# 设置物种代码为行名
+rownames(abundance_data) <- species_info$`Species Code`
+
+# 转置：站点×物种 → 物种×站点
+abundance_long <- abundance_data %>%
+  mutate(SpeciesCode = rownames(abundance_data)) %>%
+  pivot_longer(-SpeciesCode, names_to = "Station", values_to = "Abundance") %>%
+  filter(Abundance > 0)
+
+# === 2. 加入物种原生/外来信息 ===
+abundance_long <- left_join(abundance_long, species_info[, c("Species Code", "Native, Exotic")],
+                            by = c("SpeciesCode" = "Species Code"))
+
+# === 3. 加入 Cluster 信息 ===
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster)
+
+abundance_clustered <- left_join(abundance_long, env_data, by = "Station")
+
+# === 4. 汇总：每个 Cluster 中 native/exotic 物种的出现频次 ===
+summary_native_exotic <- abundance_clustered %>%
+  group_by(Cluster, `Native, Exotic`) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = `Native, Exotic`, values_from = Count, values_fill = 0)
+
+# 显示结果
+summary_native_exotic
+```
+
+```{r}
+# === 加载 R 包 ===
+library(readxl)
+library(dplyr)
+library(ggplot2)
+
+# === 读取数据 ===
+species_info <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = 2)  # 第二个sheet：物种信息
+species_matrix <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = 1)  # 第一个sheet：站点×物种矩阵
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data")
+
+# === 转换为 long 格式以便后续统计 ===
+long_species <- species_matrix %>%
+  pivot_longer(-1, names_to = "SpeciesCode", values_to = "Presence") %>%
+  rename(Station = 1) %>%
+  filter(Presence > 0)
+
+# === 合并物种来源和 Cluster 信息 ===
+species_cluster_long <- long_species %>%
+  left_join(species_info %>% select(`Species Code`, `Native, Exotic`), by = c("SpeciesCode" = "Species Code")) %>%
+  left_join(env_data %>% select(Station, Cluster, `Slope (°)`, `Canopy Hgt (m)`), by = "Station")
+
+# === 统计每个 Cluster 中的 Native 和 Exotic 物种数量 ===
+cluster_native_exotic <- species_cluster_long %>%
+  group_by(Cluster, `Native, Exotic`) %>%
+  summarise(SpeciesCount = n(), .groups = "drop") %>%
+  pivot_wider(names_from = `Native, Exotic`, values_from = SpeciesCount, values_fill = 0) %>%
+  mutate(Total = `N` + `E`,
+         ExoticRatio = `E` / Total)
+
+
+# === 添加每个 Cluster 的平均坡度和冠层高度 ===
+cluster_env_summary <- env_data %>%
+  group_by(Cluster) %>%
+  summarise(Slope_mean = mean(`Slope (°)`, na.rm = TRUE),
+            CanopyHgt_mean = mean(`Canopy Hgt (m)`, na.rm = TRUE))
+
+# === 合并生态变量和外来比例 ===
+final_df <- cluster_native_exotic %>%
+  left_join(cluster_env_summary, by = "Cluster")
+
+# === 可视化：外来种比例 vs 坡度 ===
+ggplot(final_df, aes(x = Slope_mean, y = ExoticRatio, label = Cluster)) +
+  geom_point(size = 4, color = "tomato") +
+  geom_smooth(method = "lm", se = FALSE, color = "tomato") +
+  labs(title = "Exotic Species Ratio vs. Slope",
+       x = "Mean Slope (°)", y = "Exotic Species Ratio") +
+  theme_minimal()
+
+# === 可视化：外来种比例 vs 冠层高度 ===
+ggplot(final_df, aes(x = CanopyHgt_mean, y = ExoticRatio, label = Cluster)) +
+  geom_point(size = 4, color = "steelblue") +
+  geom_smooth(method = "lm", se = FALSE, color = "steelblue") +
+  labs(title = "Exotic Species Ratio vs. Canopy Height",
+       x = "Mean Canopy Height (m)", y = "Exotic Species Ratio") +
+  theme_minimal()
+
+```
+
+
+```{r}
+# === 加载 R 包 ===
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+
+# === 1. 读取物种矩阵 ===
+species_matrix <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = 1)
+species_info <- species_matrix[, 1:5]
+colnames(species_info)[1] <- "SpeciesCode"
+abundance_data <- species_matrix[, -c(2:5)]
+rownames(abundance_data) <- species_info$SpeciesCode
+
+# === 2. 转为长格式 ===
+site_columns <- names(abundance_data)[sapply(abundance_data, is.numeric)]
+abundance_long <- abundance_data %>%
+  mutate(SpeciesCode = rownames(.)) %>%
+  pivot_longer(-SpeciesCode, names_to = "Station", values_to = "Presence") %>%
+  filter(Presence > 0)
+
+# === 3. 添加 Native/Exotic 分类 ===
+species_class <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx",
+                            sheet = "Species Names and Lifeform") %>%
+  select(Code = `Species Code`, Status = `Native, Exotic`) %>%
+  filter(!is.na(Code)) %>%
+  mutate(Code = str_trim(Code),
+         Status = ifelse(Status %in% c("N", "E"), Status, NA))  # 只保留 N 和 E
+
+abundance_long <- left_join(abundance_long, species_class, by = c("SpeciesCode" = "Code"))
+
+# === 4. 加入 Cluster 信息 ===
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster)
+
+abundance_clustered <- left_join(abundance_long, env_data, by = "Station") %>%
+  filter(!is.na(Cluster) & !is.na(Status))
+
+# === 5. 汇总每个 Cluster 中外来与原生物种数量 ===
+summary_native_exotic <- abundance_clustered %>%
+  group_by(Cluster, Status) %>%
+  summarise(SpeciesCount = n_distinct(SpeciesCode), .groups = "drop") %>%
+  pivot_wider(names_from = Status, values_from = SpeciesCount, values_fill = 0) %>%
+  mutate(Total = N + E,
+         ExoticRatio = round(E / Total, 2))  # 添加外来占比
+
+# === 6. 可视化：各 Cluster 的外来种比例 ===
+ggplot(summary_native_exotic, aes(x = Cluster, y = ExoticRatio, fill = Cluster)) +
+  geom_col() +
+  labs(title = "Proportion of Exotic Species by Cluster",
+       y = "Exotic Species Ratio", x = "Cluster") +
+  theme_minimal()
+
+```
+
+
+```{r}
+# 加载所需包
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+# === 1. 读取数据 ===
+matrix_data <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = "Site-Spp Matrix")
+species_info <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = "Species Names and Lifeform")
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster)
+
+# === 2. 整理物种矩阵 ===
+matrix_data <- as.data.frame(matrix_data)
+rownames(matrix_data) <- matrix_data[[1]]
+matrix_data <- matrix_data[,-1]
+matrix_data_t <- as.data.frame(t(matrix_data))
+matrix_data_t$`Species Code` <- rownames(matrix_data_t)
+
+# === 3. 整理 Native/Exotic 信息 ===
+species_status <- species_info %>%
+  select(`Species Code`, `Native, Exotic`) %>%
+  rename(Status = `Native, Exotic`) %>%
+  filter(Status %in% c("N", "E")) %>%
+  mutate(Status = ifelse(Status == "N", "Native", "Exotic"))
+
+# === 4. 合并矩阵与 Native/Exotic 信息 ===
+merged_data <- merge(matrix_data_t, species_status, by = "Species Code", all.x = TRUE)
+
+# === 5. 转为 long 格式 ===
+long_data <- merged_data %>%
+  pivot_longer(cols = -c(`Species Code`, Status), names_to = "Station", values_to = "Presence") %>%
+  filter(Presence > 0 & !is.na(Status))
+
+# === 6. 加入 Cluster 信息 ===
+long_clustered <- left_join(long_data, env_data, by = "Station") %>%
+  filter(!is.na(Cluster))
+
+# === 7. 汇总每个 Cluster 中 Native/Exotic 物种的数量 ===
+summary_status <- long_clustered %>%
+  group_by(Cluster, Status) %>%
+  summarise(Species_Count = n_distinct(`Species Code`), .groups = 'drop') %>%
+  pivot_wider(names_from = Status, values_from = Species_Count, values_fill = 0) %>%
+  mutate(Total = N + E,
+         ExoticRatio = round(E / Total, 2))
+
+# === 8. 查看结果 ===
+print(summary_status)
+
+# === （可选）导出为 CSV ===
+# write.csv(summary_status, "Native_Exotic_Counts_by_Cluster.csv", row.names = FALSE)
+```
+
+
+```{r}
+# === 加载必要的包 ===
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# === 1. 读取数据 ===
+# 物种矩阵（物种×样点）
+species_matrix <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = "Site-Spp Matrix")
+species_info <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = "Species Names and Lifeform")
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster)
+
+# === 2. 整理物种矩阵为长格式 ===
+species_matrix <- as.data.frame(species_matrix)
+rownames(species_matrix) <- species_matrix[[1]]
+species_matrix <- species_matrix[,-1]
+species_matrix_long <- species_matrix %>%
+  mutate(SpeciesCode = rownames(species_matrix)) %>%
+  pivot_longer(-SpeciesCode, names_to = "Station", values_to = "Presence") %>%
+  filter(Presence > 0)
+
+# === 3. 整理 species_info 原生/外来标签 ===
+species_status <- species_info %>%
+  select(`Species Code`, `Native, Exotic`) %>%
+  rename(SpeciesCode = `Species Code`, Status = `Native, Exotic`) %>%
+  mutate(Status = ifelse(Status %in% c("E", "e"), "E",
+                         ifelse(Status %in% c("N", "n"), "N", NA)))
+
+# === 4. 合并物种身份与Cluster信息 ===
+species_cluster <- species_matrix_long %>%
+  left_join(species_status, by = "SpeciesCode") %>%
+  left_join(env_data, by = "Station") %>%
+  filter(!is.na(Status), !is.na(Cluster))
+
+# === 5. 按 Cluster 和物种身份统计 ===
+summary_status <- species_cluster %>%
+  group_by(Cluster, Status) %>%
+  summarise(Species_Count = n_distinct(SpeciesCode), .groups = "drop") %>%
+  pivot_wider(names_from = Status, values_from = Species_Count, values_fill = 0) %>%
+  # 如果缺少 E 或 N 列，强制添加并设为 0
+  mutate(
+    E = ifelse(!"E" %in% colnames(.), 0, E),
+    N = ifelse(!"N" %in% colnames(.), 0, N),
+    Total = E + N,
+    ExoticRatio = ifelse(Total == 0, 0, round(E / Total, 2))
+  )
+
+summary_status
+
+# === 6. 可视化外来比例 ===
+ggplot(summary_status, aes(x = Cluster, y = ExoticRatio, fill = Cluster)) +
+  geom_col() +
+  labs(title = "Proportion of Exotic Species by Cluster",
+       x = "Cluster",
+       y = "Exotic Species Ratio") +
+  theme_minimal()
+```
+
+
+```{r}
+# 所需库
+library(vegan)
+library(ggplot2)
+library(dplyr)
+
+# 设置颜色（7类群落）
+my_colors <- c("tomato", "orange", "forestgreen", "steelblue", "purple", "grey", "darkblue")
+
+# 确保 Cluster 为因子类型
+nmds_points$Cluster <- factor(nmds_points$Cluster, levels = unique(nmds_points$Cluster))
+
+# 计算凸包
+hull_points <- nmds_points %>%
+  group_by(Cluster) %>%
+  slice(chull(NMDS1, NMDS2))
+
+# 提取 stress 值
+stress_value <- round(nmds_result$stress, 3)
+
+# 🎯 主图：nMDS + convex hull + label + stress
+ggplot(nmds_points, aes(x = NMDS1, y = NMDS2, color = Cluster)) +
+  geom_polygon(data = hull_points, aes(group = Cluster, fill = Cluster),
+               alpha = 0.2, color = NA) +
+  geom_point(size = 4) +
+  geom_text(aes(label = Site), size = 2.5, vjust = -0.7) +
+  labs(title = "nMDS Ordination (Bray-Curtis, k = 7)",
+       x = "NMDS1", y = "NMDS2") +
+  scale_color_manual(values = my_colors) +
+  scale_fill_manual(values = my_colors) +
+  theme_minimal() +
+  theme(legend.position = "right") +
+  annotate("text", x = Inf, y = -Inf,
+           label = paste0("Stress = ", stress_value),
+           hjust = 1.1, vjust = -1.2, size = 4, fontface = "italic")
+
+# ✅ 附图：Shepard plot（stressplot 版本）
+stressplot(nmds_result, pch = 20, main = "Shepard Plot of NMDS Fit")
+
+# ✅ 附图：Shepard plot 自定义 ggplot 版本（可选）
+shep_data <- as.data.frame(stressplot(nmds_result))
+colnames(shep_data) <- c("Distance_rank", "Ordination_distance")
+shep_data$Index <- seq_len(nrow(shep_data))
+
+ggplot(shep_data, aes(x = Distance_rank, y = Ordination_distance)) +
+  geom_point(alpha = 0.5, size = 1) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "blue") +
+  labs(title = "Shepard Plot of NMDS Fit",
+       x = "Target rank distance",
+       y = "Ordination distance") +
+  theme_minimal() +
+  annotate("text", x = Inf, y = -Inf,
+           label = paste0("Stress = ", stress_value),
+           hjust = 1.1, vjust = -1.2, size = 4, fontface = "italic")
+```
+
+```{r}
+# 提取值（你已有的）
+stress_value <- 0.171
+nonmetric_r2 <- 0.971
+linear_r2 <- 0.86
+
+# 构造 Shepard 数据
+shep_obj <- stressplot(nmds_result)
+shep_data <- as.data.frame(shep_obj)
+colnames(shep_data) <- c("Observed_Dissimilarity", "Ordination_Distance")
+
+# ggplot2 绘图
+library(ggplot2)
+
+ggplot(shep_data, aes(x = Observed_Dissimilarity, y = Ordination_Distance)) +
+  geom_point(color = "black", alpha = 0.5, size = 1.2) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue", linetype = "dashed") +
+  labs(title = "Shepard Plot of NMDS Fit",
+       x = "Observed Dissimilarity",
+       y = "Ordination Distance") +
+  theme_minimal() +
+  annotate("text", x = Inf, y = Inf,
+           label = paste0("Non-metric fit, R² = ", nonmetric_r2,
+                          "\nLinear fit, R² = ", linear_r2,
+                          "\nStress = ", stress_value),
+           hjust = 1.1, vjust = 1.2, size = 4, fontface = "italic")
+```
+
+
+
+```{r}
+# === 加载包 ===
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# === 1. 读取数据 ===
+# Species occurrence matrix
+species_matrix <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = 1)
+
+# Species info (with Growth Form)
+species_list <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", sheet = 2)
+
+# Cluster 信息
+cluster_info <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster) %>%
+  filter(!is.na(Cluster)) %>%
+  mutate(Cluster = as.factor(Cluster))
+
+# === 2. 整理物种数据 ===
+species_long <- species_matrix %>%
+  pivot_longer(-...1, names_to = "Species Code", values_to = "Presence") %>%
+  filter(Presence > 0)
+
+# === 3. 自动合并物种信息（包含 Growth Form）===
+species_with_form <- species_long %>%
+  left_join(species_list %>% select(Species Name, Growth_Form), by = c("Species Code" = "Species name")) %>%
+  filter(!is.na(Growth_Form))
+
+# === 4. 统计每个站点中各种 Growth Form 的数量 ===
+growth_counts <- species_with_form %>%
+  group_by(Station, Growth_Form) %>%
+  summarise(Species_Count = n(), .groups = "drop")
+
+# === 5. 合并 Cluster 信息 ===
+growth_with_cluster <- growth_counts %>%
+  left_join(cluster_info, by = "Station")
+
+# === 6. 每个 Cluster 内各 Growth Form 的平均物种数 ===
+growth_summary <- growth_with_cluster %>%
+  group_by(Cluster, Growth_Form) %>%
+  summarise(
+    Mean_Species_Count = mean(Species_Count),
+    SD_Species_Count = sd(Species_Count),
+    .groups = "drop"
+  )
+
+print(growth_summary)
+
+# === 7. 可视化 ===
+ggplot(growth_summary, aes(x = Growth_Form, y = Mean_Species_Count, fill = Cluster)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Average Species Count by Growth Form and Cluster",
+    x = "Growth Form",
+    y = "Mean Number of Species"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+
+```{r}
+# === 加载必要的包 ===
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# === 1. 读取数据 ===
+# 物种矩阵（站点 × 物种代码）
+species_matrix <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", 
+                             sheet = "Site-Spp Matrix")
+
+# 物种信息（含Growth Form）
+species_info <- read_excel("Kiaaraara-SpeciesbySitesMatrixWithSpeciesList.xlsx", 
+                           sheet = "Species Names and Lifeform")
+
+# 环境数据（Cluster）
+env_data <- read_excel("Kiaaraara-PCQandEnvData.xlsx", sheet = "Env Data") %>%
+  select(Station, Cluster)
+
+# === 2. 整理 species_matrix 为长格式 ===
+# 第一列是站点名
+species_matrix <- as.data.frame(species_matrix)
+rownames(species_matrix) <- species_matrix[[1]]
+species_matrix <- species_matrix[,-1]
+
+species_long <- species_matrix %>%
+  mutate(Station = rownames(species_matrix)) %>%
+  pivot_longer(-Station, names_to = "SpeciesCode", values_to = "Presence") %>%
+  filter(Presence > 0)
+
+# === 3. 整理物种形态信息 ===
+growth_form <- species_info %>%
+  select(`Species Code`, `Fern, Climber, Shrub, Herb, Tree, Grass, Sedge, Forb`) %>%
+  rename(SpeciesCode = `Species Code`,
+         Growth_Form = `Fern, Climber, Shrub, Herb, Tree, Grass, Sedge, Forb`)
+
+# === 4. 合并 Cluster 与 Growth Form 信息 ===
+species_cluster <- species_long %>%
+  left_join(growth_form, by = "SpeciesCode") %>%
+  left_join(env_data, by = "Station") %>%
+  filter(!is.na(Growth_Form), !is.na(Cluster))
+
+# === 5. 统计每个 Cluster 内各 Growth Form 的物种数 ===
+growth_counts <- species_cluster %>%
+  group_by(Cluster, Growth_Form) %>%
+  summarise(Species_Count = n_distinct(SpeciesCode), .groups = "drop")
+
+# === 6. 计算每类所占比例 ===
+growth_prop <- growth_counts %>%
+  group_by(Cluster) %>%
+  mutate(Proportion = round(Species_Count / sum(Species_Count) * 100, 2)) %>%
+  ungroup()
+
+# === 7. 可视化（物种数） ===
+ggplot(growth_counts, aes(x = Growth_Form, y = Species_Count, fill = Growth_Form)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~Cluster, scales = "free_y") +
+  scale_fill_brewer(palette = "Paired") +
+  labs(title = "Growth Form Counts by Cluster",
+       x = "Growth Form", y = "Unique Species Count") +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# === 8. 可视化（所占比例） ===
+ggplot(growth_prop, aes(x = Cluster, y = Proportion, fill = Growth_Form)) +
+  geom_col(width = 0.7, color = "white") +
+  scale_fill_brewer(palette = "Paired") +
+  labs(title = "Proportional Composition of Growth Forms by Cluster",
+       x = "Cluster", y = "Proportion (%)", fill = "Growth Form") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "right",
+        axis.text.x = element_text(size = 10))
+```
+

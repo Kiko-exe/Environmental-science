@@ -1,0 +1,643 @@
+---
+title: "Sperm whales Gulf of California 2007-2008"
+author: "Yuehan Luo"
+date: "2025-05-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Run this if you have already installed the packages 
+library(adehabitatLT) # for analysing trajectories
+library(lubridate) # for processing time
+library(sf) # for dealing with spatial data
+library(ggplot2) # for making nice figures
+library(grid) # for creating grids in figures
+library(gridExtra) # for creating grids in figures
+library(circular) # for circular statistics of turning angles and heading
+library(ggmap) # for a basemap
+library(move) # another package for movement
+library(tmap)
+library(maptiles)
+```
+
+## Trajectory Analysis
+### 1. Data Preparation 
+```{r, read the data}
+# Read data, I choose African Lions as the animal
+animal <- read.csv('~/Downloads/Blue and fin whales Southern California 2014-2015 - Fastloc GPS data.csv') # name the file as animal
+
+head(animal)
+# check what variable are available
+names(animal)
+
+# Unique individuals
+individuals <- unique(animal$individual.local.identifier)
+individuals
+```
+
+**We have 13 individuals in the data.**
+
+### 2. Trajectory Map (static maps)
+```{r}
+animal_sf <- st_as_sf(animal, coords = c("location.long", "location.lat"), crs = 4326)
+
+# Switch to interactive mode
+tmap_mode("plot") # for your final maps you can use static maps
+
+# Basic map with OpenStreetMap + African Lions points
+tm_shape(animal_sf) +
+  tm_basemap(server = "OpenStreetMap") +
+  tm_symbols(
+    col = "individual.local.identifier",
+    palette = "Set1",
+    size = 0.5,
+    border.col = "black",     # set outline colour
+    border.lwd = 1            # set outline thickness (1 is default)
+  ) +
+  tm_view(set.view = c(-22, 17, 5))  # Center + zoom
+```
+
+### 3. Segment Duration, Length and Speed
+```{r, gps quality(not available in this file), include=FALSE}
+# How many satellites are visible - check min and max of the attribute
+#min(animal$gps.satellite.count)
+#max(animal$gps.satellite.count)
+# Remove points with less than 4 visible satellites
+# step 1, find them
+#badPoints <- which(animal$gps.satellite.count<4)
+# step 2, remove them from our data
+#animal <- animal[-badPoints,]
+```
+
+Prepare the data:
+```{r, NA}
+# Check which rows have NA values in coordinates
+NAPoints <- which(is.na(animal$location.lat) | is.na(animal$location.long))
+```
+
+```{r, lubridate}
+# First we need to convert timestamp from factor to datetime
+animal$tstamp <- strptime(as.character(animal$timestamp), "%Y-%m-%d %H:%M:%S")
+
+# Then we separate timestamp into individual components
+animal$date <- as.Date(animal$tstamp)
+animal$year <- year(animal$tstamp)
+animal$month <- month(animal$tstamp)
+animal$day <- day(animal$tstamp)
+animal$hour <- hour(animal$tstamp)
+animal$min <- minute(animal$tstamp)
+animal$sec <- second(animal$tstamp)
+
+head(animal)
+```
+
+```{r, time period}
+# What years do we have?
+years <- unique(animal$year)
+
+#Create a birdyear id for so that trajectories of different years can be separated if we so wish.
+animal$idyear<-paste0(animal$individual.local.identifier, year(animal$date))
+
+# Get individuals by year
+individualYear <- unique(animal$idyear)
+individualYear
+```
+**The time period from 2008 to 2011 in the data.**
+
+```{r, POSIX}
+# Convert timestamp to POSIX format
+animal$POSIX <- as.POSIXct(animal$timestamp, format="%Y-%m-%d %H:%M:%S")
+```
+
+```{r, remove duplicates}
+# Are any times duplicated?
+duplics <- which(duplicated(animal$POSIX)==TRUE)
+
+# Yes, we have a few points like this, so let's remove them.
+animal <- animal[-duplics,]
+```
+
+```{r, convert to sf}
+# Convert the ducks data frame into an sf object by specifying which columns are coordinates
+# Also we need to specify coordinate system, which in our case is WGS1984 (EPSG:4326 - for EPSG codes we just need the number))
+animalSF <- st_as_sf(animal, coords=c('location.long','location.lat'), crs=4326)
+animalSF
+
+```
+
+```{r, project}
+# Project data
+# Define new projection
+crsnew <- st_crs("ESRI:102014")
+
+# Transform data into the new coordinate system
+animalSF_proj <- st_transform(animalSF,crs=crsnew)
+head(animalSF_proj)
+```
+
+```{r, separate coordinates}
+# Read X an Y from geometry column as separate coordinates
+animalSF_proj$X <- st_coordinates(animalSF_proj)[,1]  
+animalSF_proj$Y <- st_coordinates(animalSF_proj)[,2]
+
+# Drop geometry column
+animalSF_proj <- st_drop_geometry(animalSF_proj)
+head(animalSF_proj)
+
+```
+
+```{r, save clean data}
+# First turn the SF into a data frame
+animal_cleanedDF <- as.data.frame(animalSF_proj)
+
+# Now save this into a csv file, giving the name of the projection in the filename
+write.csv(animal_cleanedDF, 'animal_CleanData_projected_ESRI102014.csv')
+```
+
+```{r, ltraj}
+# Create a set of trajectories, one per each individual
+animal_ltraj <- as.ltraj(xy=animalSF_proj[,c('X','Y')],        # spatial Coordinates
+                       date = animalSF_proj$POSIX,           # timestamp in POSIX format, including date/time
+                       
+                       id = animalSF_proj$individual.local.identifier)                # individual IDs
+
+# Let's plot these trajectories to see if it worked
+plot(animal_ltraj)
+```
+
+```{r, access one traj}
+# Let's focus on 10 African Lions for this analysis, I will choose the individual 1001 to 1010. Include the the long-distance traveller and sedentary.
+animal1 <- animal_ltraj[[1]]
+animal2 <- animal_ltraj[[2]]
+animal3 <- animal_ltraj[[3]]
+animal4 <- animal_ltraj[[4]]
+animal5 <- animal_ltraj[[5]]
+animal6 <- animal_ltraj[[8]]
+animal_list <- list(animal1, animal2, animal3, animal4, animal5,
+                    animal6)
+```
+
+```{r, ggplot time, include=FALSE}
+
+for (i in 1:length(animal_list)) {
+  animal <- animal_list[[i]]
+  animal <- animal[-nrow(animal), ]
+  print(
+    ggplot(animal, aes(x = dt)) +
+      geom_histogram() +
+      theme_bw() +
+      xlab("Segment duration (s)") +
+      ylab("Count") +
+      ggtitle(paste("Segment duration for animal", i))
+  )
+}
+```
+
+```{r ggplot length, include=FALSE}
+# Plot the segment length (dist) directly with an adjustment to a smaller bin width
+for (i in 1:length(animal_list)) {
+  animal <- animal_list[[i]]
+  print(
+    ggplot(animal, aes(x = dist)) +
+      geom_histogram() +
+      theme_bw() +
+      xlab("Segment length (m)") +
+      ylab("Count") +
+      ggtitle(paste("Segment length for animal", i))
+  )
+}
+```
+
+```{r, ggplot speed, include=FALSE}
+for (i in 1:length(animal_list)) {
+  animal <- animal_list[[i]]
+  animal <- animal[1:(nrow(animal)-1), ]
+  animal$speedMS <- animal$dist / animal$dt
+  animal$speedKmH <- animal$speedMS * 3.6
+  print(
+    ggplot(animal, aes(x = speedKmH)) +
+      geom_histogram() +
+      theme_bw() +
+      xlab("Speed (km/h)") +
+      ylab("Count") +
+      ggtitle(paste("Speed for animal", i))
+  )
+}
+```
+### Figure of the duration, length and speed (choosen 10)
+
+```{r, ggplot figure 4}
+for (i in 1:length(animal_list)) {
+  animal <- animal_list[[i]]
+  animal$speedMS <- animal$dist / animal$dt
+  animal$speedKmH <- animal$speedMS * 3.6
+  
+  duration_plot <- ggplot(animal, aes(x=dt)) +
+    geom_histogram() +
+    theme_bw() +
+    xlab("Segment duration (s)") +
+    ylab("Count") +
+    ggtitle(paste("Segment Duration - Animal", i))
+  
+  length_plot <- ggplot(animal, aes(x=dist)) +
+    geom_histogram() +
+    theme_bw() +
+    xlab("Segment length (m)") +
+    ylab("Count") +
+    ggtitle(paste("Segment Length - Animal", i))
+  
+  speed_plot <- ggplot(animal, aes(x=speedKmH)) +
+    geom_histogram() +
+    theme_bw() +
+    xlab("Speed (km/h)") +
+    ylab("Count") +
+    ggtitle(paste("Speed - Animal", i))
+  
+  grid.newpage()
+  pushViewport(viewport(layout = grid.layout(3, 1)))
+  print(duration_plot, vp = viewport(layout.pos.row = 1, layout.pos.col = 1))
+  print(length_plot, vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
+  print(speed_plot, vp = viewport(layout.pos.row = 3, layout.pos.col = 1))
+}
+```
+
+```{r, remove outliers}
+cleaned_list <- list()
+
+for (i in 1:length(animal_list)) {
+  
+  animal <- animal_list[[i]]
+  
+  before_plot <- ggplot(animal, aes(x=dt)) + 
+    geom_boxplot() + 
+    ggtitle(paste0("Before cleaning: animal", i)) + 
+    theme_minimal()
+  
+  animal_cleaned <- animal[-which(animal$dt > 10000), ]
+  cleaned_list[[i]] <- animal_cleaned
+  
+  after_plot <- ggplot(animal_cleaned, aes(x=dt)) + 
+    geom_boxplot() + 
+    ggtitle(paste0("After cleaning: animal", i)) + 
+    theme_minimal()
+  grid.arrange(before_plot, after_plot, nrow = 2)
+}
+```
+
+```{r, all statistics}
+n <- length(animal_list)  # Number of individuals
+
+# Initialize an empty data frame with columns for the statistics we want to calculate
+results <- data.frame(
+  dt_mean = numeric(n),
+  dt_std = numeric(n),
+  dist_mean = numeric(n),
+  dist_std = numeric(n),
+  speedKmH_mean = numeric(n),
+  speedKmH_std = numeric(n)
+)
+
+# Step 3: For loop to calculate all the statistics
+
+for (i in 1:length(animal_list)) {
+
+  # Here I have copied the calculation code from step 1, but edited to include the index i
+  
+  # First we need to assign the data to a generic variable we will use in the for loop
+  thisanimal <- animal_ltraj[[i]] # note how this is the same as above, except I replaced 1 with the index i
+
+  # We also need to calculate speed, because we haven't done that for all ducks yet
+  thisanimal$speedKmH <- (thisanimal$dist/thisanimal$dt)*3.6
+
+  # Then we need to get rid of all NA values in the respective columns, using the two concepts you already know, is.na and | operator
+  dtNAs <- which(is.na(thisanimal$dt)==TRUE | is.na(thisanimal$dist)==TRUE | is.na(thisanimal$speedKmH)==TRUE)
+  # We remove rows with NAs
+  thisanimal <- thisanimal[-dtNAs,]
+
+  # Finally we calculate statistics for this duck, but unlike above, we now put these into the results data frame, in row i
+  results$dt_mean[i] <- mean(thisanimal$dt)
+  results$dt_std[i] <- sd(thisanimal$dt)
+  results$dist_mean[i] <- mean(thisanimal$dist)
+  results$dist_std[i] <- sd(thisanimal$dist)
+  results$speedKmH_mean[i] <- mean(thisanimal$speedKmH)
+  results$speedKmH_std[i] <- sd(thisanimal$speedKmH)
+
+} 
+```
+
+```{r, R2 mean}
+
+# We don't have to initialise the results data frame here, because we already have it. But we will add two columns to it, like this:
+results$R2n_mean <- NA
+results$R2n_std <- NA
+
+# Now let's use a for loop to populate these two columns. The loop is very similar to the previous one:
+
+for (i in 1:length(animal_list)) {
+
+  # Assign data to the generic variable
+  thisanimal <- animal_ltraj[[i]] 
+
+  # Then we need to get rid of all NA values in the respective column
+  R2nNAs <- which(is.na(thisanimal$R2n)==TRUE)
+  
+  # Here comes the new If statement: if there are some NAs, we remove them, if not, we don't do anything.
+  if (length(R2nNAs)>0) {
+    thisanimal <- thisanimal[-R2nNAs,]
+  }
+
+  # Finally we calculate statistics for this duck, but unlike above, we now put these into the results data frame, in row i
+  results$R2n_mean[i] <- mean(thisanimal$R2n)
+  results$R2n_std[i] <- sd(thisanimal$R2n)
+
+} 
+```
+
+### 4. Net Squared Displacement (NSD)
+
+```{r, nsd}
+for (i in 1:length(animal_list)) {
+  # Create the plot for each animal
+  plot <- ggplot(animal_ltraj[[i]], aes(x=date, y=R2n)) + 
+    geom_point() + 
+    theme_bw() + 
+    xlab("Date") + 
+    ylab("R2n") + 
+    ggtitle(paste("Net square displacement over time for animal", i))
+  
+  # Print the plot for each animal
+  print(plot)
+}
+```
+
+### 5. Turning Angle and Heading
+
+```{r}
+
+# Take one duck
+thisanimal <- animal_ltraj[[1]]
+
+# Convert relative angle from radians into degrees
+thisanimal$turningAngle <- thisanimal$rel.angle * 180 / pi
+# Check it
+head(thisanimal)
+
+# Build a circular plot
+angleplot <- ggplot(thisanimal, aes(x=turningAngle)) + geom_histogram(binwidth=2)+coord_polar(start = pi)+
+  theme_bw()+scale_x_continuous(limits = c(-180,180),breaks=c(-180,-90,0,90,180))+xlab("Turning Angle")+ylab("Count")+
+  ggtitle("Turning angle for animal 1")
+
+# Export as a figure
+png(filename="animal1_TurningAngle.png")
+print(angleplot)
+dev.off()
+
+# Remove NAs 
+turnNAs <- which(is.na(thisanimal$turningAngle)==TRUE)
+  
+# Here comes the new If statement: if there are some NAs, we remove them, if not, we don't do anything.
+if (length(turnNAs)>0) {
+    thisanimal <- thisanimal[-turnNAs,]
+}
+
+# Calculate statistics - because angles are circular, we need to use circular mean and circular std, from package circular
+turningAngle_mean <- mean(circular(thisanimal$turningAngle))
+turningAngle_std <- sd(circular(thisanimal$turningAngle))
+```
+
+```{r}
+# Take a lion
+thisanimal <- animal_ltraj[[2]]
+
+# Check to see in which columns we have the x and y coordinates
+head(thisanimal)
+# Ok, they are called x and y. 
+
+# So now we will take a loop that will go through this trajecotry. We need to know the number of points in the trajectory,
+# we can just check the length of one of the coordinates.
+nPoints <- length(thisanimal$x)
+
+# Also we need to add a new field for the heading to thisduck data frame
+thisanimal$heading <- NA
+
+# For loop through the trajectory, but not to the end, we skip the final point!
+
+for (i in 1:(nPoints-1)) {
+  
+  # Let's read the coordinates from two consecutive points, i and i+1
+  x1 <- thisanimal$x[i]
+  x2 <- thisanimal$x[i+1]
+  y1 <- thisanimal$y[i]
+  y2 <- thisanimal$y[i+1]
+  
+  # And calculate the heading as arctan of the two values, plus convert to degrees
+  thisanimal$heading[i] <- atan2((x2-x1),(y2-y1)) * 180 / pi
+  
+}
+
+# Build a circular plot
+angleplot <- ggplot(thisanimal, aes(x=heading)) + geom_histogram(binwidth=2)+coord_polar(start = pi)+
+  theme_bw()+scale_x_continuous(limits = c(-180,180),breaks=c(-180,-90,0,90,180))+
+  xlab("Heading")+ylab("Count")+ggtitle("Heading for duck 2")
+
+# Export as a figure
+png(filename="Animal2_Heading.png")
+print(angleplot)
+dev.off()
+
+# Remove NAs - there will be at least one, for the last point through which we didn't loop
+headingNAs <- which(is.na(thisanimal$heading)==TRUE)
+  
+# If there are some NAs, we remove them, if not, we don't do anything.
+if (length(headingNAs)>0) {
+    thisanimal <- thisanimal[-headingNAs,]
+}
+
+# Calculate statistics - because angles are circular, we need to use circular mean and circular std, from package circular
+heading_mean <- mean(circular(thisanimal$heading))
+heading_std <- sd(circular(thisanimal$heading))
+```
+
+```{r, turning angle}
+turning_summary <- data.frame(
+  animal_id = numeric(),
+  mean_angle = numeric(),
+  std_angle = numeric()
+)
+
+for (i in 1:length(animal_list)) {
+  animal <- animal_list[[i]]
+  
+  if (!all(c("x", "y") %in% names(animal))) next
+  animal$turning <- NA
+  
+  for (j in 2:(nrow(animal) - 1)) {
+    x1 <- animal$x[j - 1]
+    x2 <- animal$x[j]
+    x3 <- animal$x[j + 1]
+    y1 <- animal$y[j - 1]
+    y2 <- animal$y[j]
+    y3 <- animal$y[j + 1]
+    
+    angle1 <- atan2(y2 - y1, x2 - x1)
+    angle2 <- atan2(y3 - y2, x3 - x2)
+    turn <- angle2 - angle1
+    
+    if (turn > pi) turn <- turn - 2 * pi
+    if (turn < -pi) turn <- turn + 2 * pi
+    
+    animal$turning[j] <- turn * 180 / pi
+  }
+  
+  animal_cleaned <- animal[!is.na(animal$turning), ]
+  
+  mean_turn <- mean(circular(animal_cleaned$turning, units = "degrees"))
+  sd_turn <- sd(circular(animal_cleaned$turning, units = "degrees"))
+  
+  turning_summary <- rbind(turning_summary, data.frame(
+    animal_id = i,
+    mean_angle = mean_turn,
+    std_angle = sd_turn
+  ))
+
+  angleplot <- ggplot(animal_cleaned, aes(x = turning)) +
+    geom_histogram(binwidth = 2) +
+    coord_polar(start = pi) +
+    theme_bw() +
+    scale_x_continuous(limits = c(-180, 180), breaks = c(-180, -90, 0, 90, 180)) +
+    xlab("Turning Angle") + ylab("Count") +
+    ggtitle(paste("Turning Angle for Animal", i))
+  
+  print(angleplot)
+  cat(paste0("Animal ", i, " – Mean Turning Angle: ", round(mean_turn, 2),
+             "°, Std Dev: ", round(sd_turn, 2), "°\n\n"))
+}
+```
+
+```{r, heading}
+
+# We don't have to initialise the results data frame here, because we already have it. But we will add two columns to it, like this:
+results$heading_mean <- NA
+results$heading_std <- NA
+
+# Here start the nested loops
+
+# External For loop for all the ducks - note the index is now called j!
+for (j in 1:length(animal_list)) {
+
+  # Take a lion
+  thisanimal <- animal_ltraj[[j]]
+
+  # So now we will take a loop that will go through this trajecotry. We need to know the number of points in the   trajectory,
+  # we can just check the length of one of the coordinates.
+  nPoints <- length(thisanimal$x)
+
+  # Also we need to add a new field for the heading to thisanimal data frame
+  thisanimal$heading <- NA
+
+  # Internal for loop through the trajectory, but not to the end, we skip the final point!
+  # This loop has index i
+  for (i in 1:(nPoints-1)) {
+  
+    # Let's read the coordinates from two consecutive points, i and i+1
+    x1 <- thisanimal$x[i]
+    x2 <- thisanimal$x[i+1]
+    y1 <- thisanimal$y[i]
+    y2 <- thisanimal$y[i+1]
+  
+    # And calculate the heading as arctan of the two values, plus convert to degrees
+    thisanimal$heading[i] <- atan2((x2-x1),(y2-y1)) * 180 / pi
+  
+  } # end for i
+
+  # Build a circular plot
+  angleplot <- ggplot(thisanimal, aes(x=heading)) + geom_histogram(binwidth=2)+coord_polar(start = pi)+
+    theme_bw()+scale_x_continuous(limits = c(-180,180),breaks=c(-180,-90,0,90,180))+
+    xlab("Heading")+ylab("Count")+ggtitle(paste("Heading for animal ",j,sep=""))
+  
+  # Export as a figure 
+  #png(filename=paste("Animal",j,"_Heading.png",sep=""))
+  print(angleplot)
+  #dev.off()
+
+  # Remove NAs - there will be at least one, for the last point through which we didn't loop
+  headingNAs <- which(is.na(thisanimal$heading)==TRUE)
+  
+  # Here comes the new If statement: if there are some NAs, we remove them, if not, we don't do anything.
+  if (length(headingNAs)>0) {
+    thisanimal <- thisanimal[-headingNAs,]
+  }
+
+  # Calculate statistics - because angles are circular, we need to use circular mean and circular std
+  results$heading_mean[j] <- mean(circular(thisanimal$heading))
+  results$heading_std[j] <- sd(circular(thisanimal$heading))
+  
+} # end for j
+
+# Check results
+results
+
+```
+
+## 6. Radius of Gyration 
+
+```{r, include=FALSE}
+
+# Pick a duck
+thisanimal <- animal_ltraj[[3]]
+
+# Find number of points in this trajectory
+noPoints <- length(thisanimal$x)
+
+# Calculate the mean centre of all locations
+# This is done by summing up all x's and dividing by number of points to get the x coordinate of the centre.
+# And the same for y coordinate.
+centreX <- sum(thisanimal$x)/noPoints
+centreY <- sum(thisanimal$y)/noPoints
+
+# Distance of each point to (centreX, centreY)
+thisanimal$distTocentre <- sqrt((centreX-thisanimal$x)^2+(centreY-thisanimal$y)^2)
+
+# Check result
+head(thisanimal)
+
+# Calculate radius of gyration
+gyration <- sqrt(sum(thisanimal$distTocentre)/noPoints)
+```
+
+```{r, radius gyration}
+
+# Prepare the field in the results data frame
+results$gyration <- NA
+
+# For loop across all ducks
+for (i in 1:length(animal_list)) {
+
+  # Pick a duck
+  thisanimal <- animal_ltraj[[i]]
+
+  # Find number of points in this trajectory
+  noPoints <- length(thisanimal$x)
+
+  # Calculate the mean centre of all locations
+  centreX <- sum(thisanimal$x)/noPoints
+  centreY <- sum(thisanimal$y)/noPoints
+
+  # Distance of each point to (centreX, centreY)
+  thisanimal$distTocentre <- sqrt((centreX-thisanimal$x)^2+(centreY-thisanimal$y)^2)
+
+  # Calculate radius of gyration and insert it into the results data frame
+  results$gyration[i] <- sqrt(sum(thisanimal$distTocentre)/noPoints)
+  
+}
+# Check results
+results
+
+# This is the last thing we will add to results, so let's also export these into a file.
+# write.csv(results, "Animal_results.csv", row.names=FALSE)
+
+```

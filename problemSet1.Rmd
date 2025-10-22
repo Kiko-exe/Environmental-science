@@ -1,0 +1,153 @@
+---
+title: "ENVSCI 705 'Handling Environmental Data' - Problem Set 1"
+author: "Yuehan Luo"
+output: html_document
+---
+
+Answers to this problem set are due **Friday 21^st^ March** [week 3 of semester].  Please upload the RMarkdown file via Canvas - you don't need to upload the knitted output. **Submissions in other file formats will not be marked**  You will need to install and use the `ggplot2` and `dslabs` packages to complete this problem set. `dslabs` provides some data sets that we will use here.  You will need to use the help to answer some of these questions, but we have discussed nearly everything here in the first class sessions. Insert the code chunks and any comments after each question.  Make sure to name the code chunks and include code comments!  For all plots, axes should be labelled appropriately, etc.; otherwise all the instructions are given below.   
+
+In the following, I have used *italics* for variable (column) names, **bold** for data frames, and the standard formatting for R code.
+
+```{r download}
+library(dslabs)
+library(ggplot2)
+library(dplyr)
+```
+
+#### Problem 1
+The chunk below has some broken code in it so (i) the document will not knit and (ii) R will throw some errors.  Fix the chunk so the document knits and the code runs. I have commented the lines out to make this document - you will need to uncomment them.
+
+```{r}
+letter_words <- c("the", "quick", "brown", "fox")  # commas
+median(1:10)  # "medain" to "median" & colon operator
+mean_x <- mean(1:10)
+y = mean_x  # from "==" to "=" 
+max(c(1, 17, 2, -9))  # missing closing parenthesis
+grp <- c("species 1", "species 2")  # fixed comma and quotes position
+a <- "5"
+b <- 10
+a <- as.numeric(a)
+a + b
+sum(1:3, negative = FALSE)
+```
+
+
+#### Problem 2
+Load the dslabs package (use `install.packages` if you haven't previously installed it).  Open the built-in data frame called **brexit_polls**.  Provide five different ways of showing how many rows are in the **brexit_polls** data frame.  Give two commands that provide a summary (statistical or data structure) of the **brexit_polls** dataframe.
+
+
+```{r answer1}
+# code goes here
+data(brexit_polls)
+
+# 1
+nrow(brexit_polls)
+
+# 2
+dim(brexit_polls)[1]
+
+# 3
+length(brexit_polls[[1]])
+
+# 4
+
+brexit_polls %>% tally()
+
+# 5
+brexit_polls %>% count()
+
+# 1
+summary(brexit_polls)
+
+# 2
+str(brexit_polls)
+```
+
+
+#### Problem 3
+Assign the standard deviation of the _remain_ variable to an object. Create another object and assign it the value of the mean of the _spread_ variable. Finally, calculate the [coefficient of variation, CV](https://en.wikipedia.org/wiki/Coefficient_of_variation) for the _leave_ variable and store it. An alternative to the CV is the [quartile coefficient of dispersion] (https://en.wikipedia.org/wiki/Quartile_coefficient_of_dispersion), calculate this as well.  I have not named chunks from this point -- you need to do this.
+
+
+```{r}
+# code goes here
+std_remain <- sd(brexit_polls$remain, na.rm = TRUE)
+mean_spread <- mean(brexit_polls$spread, na.rm = TRUE)
+cv_leave <- sd(brexit_polls$leave, na.rm = TRUE) / mean(brexit_polls$leave, na.rm = TRUE)
+qcd_leave <- (quantile(brexit_polls$leave, 0.75, na.rm = TRUE) - quantile(brexit_polls$leave, 0.25, na.rm = TRUE)) / 
+  (quantile(brexit_polls$leave, 0.75, na.rm = TRUE) + quantile(brexit_polls$leave, 0.25, na.rm = TRUE))
+std_remain
+mean_spread
+cv_leave
+qcd_leave
+```
+#### Problem 4
+Using ggplot, make a histogram of the _temp_ variable in the **stars** dataset (again in `dslabs`). 
+You can see that the distribution of _temp_ is right-skewed. Use `xlim` in ggplot to restrict the x-axis length. 
+
+```{r}
+# code goes here
+data(stars)
+ggplot(data = stars, aes(x = temp)) +
+geom_histogram() +
+  labs(title = "TEMPERATURE DISTRIBUTION", x = "Temperature (K)", y = "Frequency")
+```
+
+
+#### Problem 5
+Open the **historic_co2** dataframe from the `dslabs` package.  Using ggplot, plot the changes in CO~2~ over time, modifying the theme, labelling axes, etc. as you wish.  Use different colours to denote the different data sources. 
+
+```{r}
+# code goes here
+data(historic_co2)
+ggplot(historic_co2, aes(x = year, y = co2, color = source)) +
+  geom_line() +
+  labs(title = "CHANGES IN CO2 OVER TIME", x = "Year (CE)", y = "CO2 (ppm)") +
+  scale_color_manual(values = c("green", "purple")) +
+  geom_smooth(method = "loess")
+```
+
+#### Problem 6
+The dataset **research_funding_rates** (again in `dslabs`) contains information on gender-bias in Netherlands research funding (described in [van der Lee & Ellemers 2015](https://www.pnas.org/content/112/40/12349.abstract). 
+Make a scatter plot of success rates for men vs. women, with a 1:1 line (i.e., a line where _x_ = _y_) superimposed on the data, and the points labelled by discipline (`geom_text`). 
+
+```{r}
+# code goes here
+data(research_funding_rates)
+
+ggplot(research_funding_rates, aes(x = success_rates_men, y = success_rates_women)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  geom_text(aes(label = discipline)) +
+  labs(title = "SUCCESS RATE", x = "Succession rate for men (%)", y = "Succession rate for women (%)")
+```
+
+#### Problem 7
+Open the **gapminder** data frame from `dslabs.` Make a scatterplot of _fertility_ (y) against _life_expectancy_ (x) with the points coloured by the _year_ variable.  Facet the fertility-life_expectancy figure by continent and add a smoother to each facet.  
+
+```{r}
+# code goes here
+data(gapminder)
+ggplot(gapminder, aes(x = life_expectancy, y = fertility, color = year)) +
+  geom_point() + 
+  scale_color_gradient() +  
+  facet_wrap(~continent) +
+  geom_smooth(method = "gam", formula = y ~ s(x), color = "red") + 
+  labs(x = "Life expectancy (yr)", y = "Fertility (ave children / woman)", title = "Fertility vs. Life Expectancy by Continent") +
+  theme_minimal()
+```
+
+
+#### 8. Finally, visualise the relationship between [divorce rates in Maine and the consumption (_per capita_) of margarine in the US](http://www.tylervigen.com/spurious-correlations).  
+These data are in the **divorce_margarine** data set in `dslabs`.  Produce a scatter plot showing the relationship between margarine consumption and divorce rate in Maine and add a linear smoother.  Add the correlation coefficient between the two variables to the plot (hint: `annotate`).  Any comments on this relationship?
+
+```{r}
+# code goes here
+data(divorce_margarine)
+
+# Create scatter plot with linear smoother
+ggplot(divorce_margarine, aes(x = margarine_consumption_per_capita, y = divorce_rate_maine)) +
+  geom_point() +
+  geom_smooth(method = "lm", formula = y ~ x, color = "blue") +
+  annotate("text", x = 5, y = 5, label = paste("Correlation coefficient", round(cor(divorce_margarine$margarine_consumption_per_capita, divorce_margarine$divorce_rate_maine), 3))) +
+  labs(title = "DIVORCE RATE VS. MARGARINE CONSUMPTION", x = "Margarine Consumption (per capita)", y = "Divorce Rate in Manie")
+```
